@@ -17,13 +17,13 @@ export async function generateMetadata(): Promise<Metadata> {
   const requestHeaders = await headers();
   const host = requestHeaders.get("x-forwarded-host") ?? requestHeaders.get("host") ?? "localhost:3000";
   const protocol = requestHeaders.get("x-forwarded-proto") ?? (host.startsWith("localhost") ? "http" : "https");
-  const socialImage = `${protocol}://${host}/og.png`;
-  const title = "RoleSignal — Find work worth applying for";
-  const description = "Explainable job matching and guarded application automation for ambitious engineers.";
+  const socialImage = `${protocol}://${host}/og-phase5.png`;
+  const title = "RoleSignal — Qualified jobs, clear evidence";
+  const description = "Scheduled cross-portal job discovery, evidence-semantic matching, and guarded application automation for backend engineers.";
   return {
     title,
     description,
-    openGraph: { title, description, images: [{ url: socialImage, width: 1536, height: 1024, alt: "RoleSignal job matching dashboard" }] },
+    openGraph: { title, description, images: [{ url: socialImage, width: 1733, height: 908, alt: "RoleSignal Phase 5 evidence-led job discovery" }] },
     twitter: { card: "summary_large_image", title, description, images: [socialImage] },
   };
 }

@@ -2,11 +2,11 @@
 
 RoleSignal is an explainable job-matching and approval-first application workspace for backend engineers. It optimizes for interview probability, role quality, and career upside instead of application volume.
 
-## Phase 4 capabilities
+## Phase 5 capabilities
 
 - Extracts text from PDF, DOCX, and TXT resumes and stores the source file in R2.
 - Maintains a verified career profile in D1 without inventing unsupported claims.
-- Imports individual job pages or scans public Greenhouse and Lever boards.
+- Imports individual job pages or scans public Greenhouse, Lever, and Ashby boards.
 - Scores every role with a transparent 100-point backend-engineering rubric.
 - Separates language mismatch from engineering-domain mismatch.
 - Deduplicates on company, role, and location while preferring official URLs.
@@ -22,6 +22,13 @@ RoleSignal is an explainable job-matching and approval-first application workspa
 - Launches targeted LinkedIn, Naukri, Indeed, and wider web searches from one Discovery workspace.
 - Imports visible LinkedIn, Naukri, Workday, Indeed, and company-portal job cards captured by the Chrome companion.
 - Keeps public-feed runs and authenticated portal captures in one durable discovery history.
+- Runs an hourly Cloudflare Worker pulse and executes each saved search only when its chosen cadence is due.
+- Stores automation health, next-run timing, failures, and a deduplicated Signal inbox in D1.
+- Sends opt-in browser notifications for newly qualified matches while keeping the in-app inbox authoritative.
+- Scans public Ashby job boards alongside Greenhouse and Lever, including full descriptions and compensation when published.
+- Launches searches across LinkedIn, Naukri, Indeed, Wellfound, Cutshort, Instahyre, Hirist, Foundit, Google Jobs, and YC Startups.
+- Retrieves the full official job page on demand, reads JobPosting structured data, and rescores the role.
+- Uses an explainable evidence-semantic graph to translate Kafka/queue, cloud, caching, orchestration, data-scale, reliability, and AI-agent requirements into verified transferable experience.
 
 ## Safety model
 
@@ -50,7 +57,7 @@ npm run db:generate
 
 ## Browser companion
 
-The extension source is in `browser-extension/`. Load it unpacked from `chrome://extensions`, or download the generated zip from the running app. Version 0.4 can capture job cards visible on the active portal results page and copy a normalized discovery batch back to RoleSignal.
+The extension source is in `browser-extension/`. Load it unpacked from `chrome://extensions`, or download the generated zip from the running app. Version 0.5 can capture job cards visible across the expanded portal set and copy a normalized discovery batch back to RoleSignal.
 
 ## Publish to GitHub
 
@@ -60,10 +67,11 @@ Create an empty repository on GitHub, then add it as the local `origin` and push
 
 - Vinext / React 19 interface
 - Cloudflare Worker API
-- D1 for profiles, job matches, preferences, verified answers, saved discovery searches, discovery runs, application kits, packets, and audit events
+- D1 for profiles, job matches, preferences, verified answers, saved discovery searches, automation schedules, alerts, discovery runs, application kits, packets, and audit events
 - R2 for resume files
 - Drizzle schema and checked-in SQL migrations
-- Public Greenhouse, Lever, Jobicy, and Arbeitnow feeds for server-side discovery
+- Public Greenhouse, Lever, Ashby, Jobicy, and Arbeitnow feeds for server-side discovery
+- Cloudflare Cron Trigger for hourly due-search processing
 - Browser-assisted capture for portals that depend on a signed-in user session
 
 The OpenAI analysis path is intentionally not enabled until a server-side API key is configured. The current release uses deterministic, auditable extraction and scoring.

@@ -23,14 +23,23 @@ test("server-renders the RoleSignal product shell", async () => {
   assert.doesNotMatch(html, /Your site is taking shape|react-loading-skeleton/);
 });
 
-test("keeps Phase 4 discovery, operations, safety, and persistence contracts in source", async () => {
-  const [worker, app, schema, extension, popup] = await Promise.all([
+test("keeps Phase 5 automation, semantic matching, discovery, and safety contracts in source", async () => {
+  const [worker, app, schema, extension, popup, scoring, vite] = await Promise.all([
     readFile(new URL("../worker/index.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/rolesignal-app.tsx", import.meta.url), "utf8"),
     readFile(new URL("../db/schema.ts", import.meta.url), "utf8"),
     readFile(new URL("../browser-extension/content.js", import.meta.url), "utf8"),
     readFile(new URL("../browser-extension/popup.js", import.meta.url), "utf8"),
+    readFile(new URL("../lib/rolesignal.ts", import.meta.url), "utf8"),
+    readFile(new URL("../vite.config.ts", import.meta.url), "utf8"),
   ]);
+  assert.match(worker, /async scheduled/);
+  assert.match(worker, /executeDueAutomations/);
+  assert.match(worker, /\/api\/rolesignal\/automation\/settings/);
+  assert.match(worker, /\/api\/rolesignal\/automation\/run-now/);
+  assert.match(worker, /\/api\/rolesignal\/alerts\/read/);
+  assert.match(worker, /\/api\/rolesignal\/jobs\/enrich/);
+  assert.match(worker, /posting-api\/job-board/);
   assert.match(worker, /\/api\/rolesignal\/discovery\/run/);
   assert.match(worker, /\/api\/rolesignal\/discovery\/capture/);
   assert.match(worker, /\/api\/rolesignal\/export\/discovery-run\.md/);
@@ -52,6 +61,8 @@ test("keeps Phase 4 discovery, operations, safety, and persistence contracts in 
   assert.match(schema, /applicationKits/);
   assert.match(schema, /discoverySearches/);
   assert.match(schema, /discoveryRuns/);
+  assert.match(schema, /automationSettings/);
+  assert.match(schema, /jobAlerts/);
   assert.match(schema, /idx_job_matches_user_fingerprint/);
   assert.match(app, /extractText\(new Uint8Array/);
   assert.match(app, /extractRawText/);
@@ -59,6 +70,12 @@ test("keeps Phase 4 discovery, operations, safety, and persistence contracts in 
   assert.match(app, /One run\. Every connected source/);
   assert.match(app, /Market-wide discovery/);
   assert.match(app, /Search beyond one company/);
+  assert.match(app, /Your job search keeps watch/);
+  assert.match(app, /Signal inbox/);
+  assert.match(app, /Deep-analyze JD/);
+  assert.match(scoring, /semanticCatalog/);
+  assert.match(scoring, /Message-driven systems/);
+  assert.match(vite, /crons:\s*\["0 \* \* \* \*"\]/);
   assert.match(extension, /work_authorization/);
   assert.match(extension, /ROLE_SIGNAL_CAPTURE/);
   assert.match(extension, /captureVisibleJobs/);

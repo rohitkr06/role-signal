@@ -64,6 +64,13 @@ function portalName() {
   if (host.includes("naukri")) return "Naukri";
   if (host.includes("myworkdayjobs") || host.includes("workday")) return "Workday";
   if (host.includes("indeed")) return "Indeed";
+  if (host.includes("wellfound")) return "Wellfound";
+  if (host.includes("cutshort")) return "Cutshort";
+  if (host.includes("instahyre")) return "Instahyre";
+  if (host.includes("hirist")) return "Hirist";
+  if (host.includes("foundit")) return "Foundit";
+  if (host.includes("ycombinator")) return "YC Startups";
+  if (host.includes("glassdoor")) return "Glassdoor";
   return "Browser capture";
 }
 

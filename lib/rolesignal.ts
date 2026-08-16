@@ -48,6 +48,7 @@ export type ScoredJob = JobInput & {
   highPriority: boolean;
   resumeFit: "DEFAULT" | "CUSTOMIZE";
   resumeChanges: string[];
+  semanticMatches: Array<{ requirement: string; evidence: string; confidence: "high" | "medium" }>;
 };
 
 export const ROHIT_PROFILE: CandidateProfile = {
@@ -94,6 +95,51 @@ const infraTerms = ["kubernetes", "docker", "gcp", "cloud", "autoscaling", "obse
 const aiTerms = ["voice ai", "conversational ai", "ai agent", "llm", "openai", "contact center", "communication api", "cpaas", "speech"];
 const qualityTerms = ["product", "platform", "infrastructure", "scale", "ownership", "engineering", "saas", "developer"];
 const rejectRoleTerms = ["frontend", "mobile developer", "qa engineer", "sdet", "data analyst", "data scientist", "technical support", "wordpress", "intern", "fresher", "graduate engineer"];
+
+const semanticCatalog = [
+  {
+    requirement: "Message-driven systems",
+    terms: ["kafka", "rabbitmq", "sqs", "nats", "message broker", "message queue"],
+    expansion: "queue event-driven asynchronous retry distributed",
+    evidence: "Built fault-isolated production workflows with GCP Pub/Sub, Cloud Tasks, webhooks and retries.",
+    confidence: "high" as const,
+  },
+  {
+    requirement: "Workflow orchestration",
+    terms: ["temporal", "workflow engine", "orchestration engine", "durable workflow"],
+    expansion: "orchestration event-driven asynchronous retry webhook system design",
+    evidence: "Designed three-stage pre-call, in-call and post-call orchestration for enterprise workflows.",
+    confidence: "high" as const,
+  },
+  {
+    requirement: "High-scale data systems",
+    terms: ["large-scale database", "high scale database", "billions of rows", "database migration", "query performance"],
+    expansion: "database mysql sql data infrastructure scale production",
+    evidence: "Led a zero-downtime MySQL migration spanning 100M+ rows and 120GB+ of production data.",
+    confidence: "high" as const,
+  },
+  {
+    requirement: "Caching and low-latency services",
+    terms: ["memcached", "distributed cache", "low latency", "performance optimization"],
+    expansion: "redis caching scalable backend performance",
+    evidence: "Reduced database load by roughly 60% through production Redis configuration caching.",
+    confidence: "high" as const,
+  },
+  {
+    requirement: "Cloud-native reliability",
+    terms: ["aws", "azure", "eks", "ecs", "service reliability", "site reliability", "on call"],
+    expansion: "cloud kubernetes docker autoscaling observability production reliability on-call",
+    evidence: "Owned Kubernetes scaling, observability and PagerDuty incident response for production services.",
+    confidence: "medium" as const,
+  },
+  {
+    requirement: "AI agent infrastructure",
+    terms: ["agentic", "ai agents", "llm platform", "voice ai", "conversational ai", "real-time ai"],
+    expansion: "ai agent llm voice ai communication api distributed backend production",
+    evidence: "Scaled a production AI voice-agent platform with OpenAI, Retell AI, Twilio and Deepgram integrations.",
+    confidence: "high" as const,
+  },
+] as const;
 
 function normalize(value: string) {
   return value.toLowerCase().replace(/[–—]/g, "-").replace(/\s+/g, " ").trim();
@@ -153,7 +199,15 @@ export function jobFingerprint(company: string, role: string, location: string) 
 }
 
 export function scoreJob(profile: CandidateProfile, input: JobInput, now = new Date()): ScoredJob {
-  const text = normalize([input.role, input.description, input.location, input.workMode].filter(Boolean).join(" "));
+  const rawText = normalize([input.role, input.description, input.location, input.workMode].filter(Boolean).join(" "));
+  const semanticMatches = semanticCatalog
+    .filter((concept) => includesAny(rawText, [...concept.terms]))
+    .map((concept) => ({ requirement: concept.requirement, evidence: concept.evidence, confidence: concept.confidence }));
+  const semanticExpansion = semanticCatalog
+    .filter((concept) => semanticMatches.some((match) => match.requirement === concept.requirement))
+    .map((concept) => concept.expansion)
+    .join(" ");
+  const text = `${rawText} ${semanticExpansion}`.trim();
   const profileSkills = normalize(profile.skills.join(" "));
   const matchingExperience: string[] = [];
   const missingRequirements: string[] = [];
@@ -251,6 +305,7 @@ export function scoreJob(profile: CandidateProfile, input: JobInput, now = new D
   if (infrastructure >= 6) matchingExperience.push("Kubernetes, GCP, observability and production ownership");
   if (aiVoice >= 6) matchingExperience.push("AI voice agents and real-time communication infrastructure");
   if (exactStackCount > 0) matchingExperience.push("Direct Node.js / TypeScript stack alignment");
+  matchingExperience.push(...semanticMatches.map((match) => `${match.requirement}: ${match.evidence}`));
 
   for (const [label, term] of [["AWS", "aws"], ["Kafka", "kafka"], ["gRPC", "grpc"], ["Vector databases", "vector database"]] as const) {
     if (text.includes(term) && !profileSkills.includes(term)) missingRequirements.push(label);
@@ -278,6 +333,7 @@ export function scoreJob(profile: CandidateProfile, input: JobInput, now = new D
     highPriority,
     resumeFit: resumeChanges.length >= 2 ? "CUSTOMIZE" : "DEFAULT",
     resumeChanges: unique(resumeChanges).slice(0, 5),
+    semanticMatches,
   };
 }
 

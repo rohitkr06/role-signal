@@ -36,6 +36,8 @@ type MatchJob = {
   resumeFit: string;
   resumeChanges: string[];
   breakdown?: Record<string, number>;
+  semanticMatches?: Array<{ requirement: string; evidence: string; confidence: "high" | "medium" }>;
+  enrichedAt?: string;
   isSample?: boolean;
 };
 
@@ -124,9 +126,35 @@ type DiscoveryRun = {
     portal?: string;
     sourceUrl?: string;
     rejected?: number;
+    alertsCreated?: number;
   };
   startedAt: string;
   completedAt?: string;
+};
+
+type AutomationSettings = {
+  enabled: boolean;
+  cadenceHours: number;
+  minScore: number;
+  browserAlerts: boolean;
+  lastRunAt?: string;
+  nextRunAt: string;
+  lastStatus: string;
+  lastError?: string;
+  updatedAt: string;
+};
+
+type JobAlert = {
+  id: string;
+  jobId: string;
+  discoveryRunId?: string;
+  kind: string;
+  status: string;
+  title: string;
+  summary: string;
+  detail: { job?: MatchJob; score?: number; classification?: string };
+  createdAt: string;
+  readAt?: string;
 };
 
 type Workspace = {
@@ -140,6 +168,8 @@ type Workspace = {
   searchRuns: SearchRun[];
   discoverySearches: DiscoverySearch[];
   discoveryRuns: DiscoveryRun[];
+  automation?: AutomationSettings | null;
+  alerts: JobAlert[];
 };
 
 type ScanReport = {
@@ -243,7 +273,7 @@ const navItems: Array<{ id: View; label: string; mark: string }> = [
   { id: "matches", label: "Matches", mark: "03" },
   { id: "sources", label: "Company boards", mark: "04" },
   { id: "runs", label: "ATS runs", mark: "05" },
-  { id: "autopilot", label: "Autopilot", mark: "06" },
+  { id: "autopilot", label: "Automation", mark: "06" },
   { id: "applications", label: "Applications", mark: "07" },
   { id: "profile", label: "Career profile", mark: "08" },
 ];
@@ -286,6 +316,8 @@ export function RoleSignalApp() {
   const [sources, setSources] = useState<Workspace["sources"]>([]);
   const [searchRuns, setSearchRuns] = useState<SearchRun[]>([]);
   const [discoveryRuns, setDiscoveryRuns] = useState<DiscoveryRun[]>([]);
+  const [automation, setAutomation] = useState<AutomationSettings | null>(null);
+  const [alerts, setAlerts] = useState<JobAlert[]>([]);
   const [answerVault, setAnswerVault] = useState<AnswerVaultRow[]>([]);
   const [answerValues, setAnswerValues] = useState<Record<string, string>>({
     phone: "",
@@ -318,6 +350,10 @@ export function RoleSignalApp() {
     minScore: 75,
   });
   const [captureText, setCaptureText] = useState("");
+  const [scheduleEnabled, setScheduleEnabled] = useState(false);
+  const [cadenceHours, setCadenceHours] = useState(24);
+  const [alertThreshold, setAlertThreshold] = useState(82);
+  const [browserAlerts, setBrowserAlerts] = useState(true);
   const fileInput = useRef<HTMLInputElement>(null);
 
   const displayJobs = liveJobs.length ? liveJobs : sampleJobs;
@@ -325,6 +361,7 @@ export function RoleSignalApp() {
   const needsAttention = packets.filter((packet) => packet.status === "NEEDS_INPUT").length;
   const latestRun = searchRuns[0];
   const latestDiscovery = discoveryRuns[0];
+  const unreadAlerts = alerts.filter((alert) => alert.status === "UNREAD");
   const primaryKeyword = discoveryForm.keywords.split(",")[0]?.trim() || "Backend Engineer";
   const primaryLocation = discoveryForm.locations.split(",")[0]?.trim() || "India";
   const portalSearches = [
@@ -332,6 +369,12 @@ export function RoleSignalApp() {
     { name: "Naukri", mark: "N", note: "India job search", url: `https://www.naukri.com/jobs-in-india?k=${encodeURIComponent(primaryKeyword)}&l=${encodeURIComponent(primaryLocation)}` },
     { name: "Indeed", mark: "i", note: "India listings", url: `https://in.indeed.com/jobs?q=${encodeURIComponent(primaryKeyword)}&l=${encodeURIComponent(primaryLocation)}` },
     { name: "Google Jobs", mark: "G", note: "Wider web search", url: `https://www.google.com/search?q=${encodeURIComponent(`${primaryKeyword} jobs ${primaryLocation}`)}` },
+    { name: "Wellfound", mark: "W", note: "Startup roles", url: `https://wellfound.com/jobs` },
+    { name: "Cutshort", mark: "C", note: "India tech roles", url: `https://cutshort.io/jobs` },
+    { name: "Instahyre", mark: "I", note: "Curated tech hiring", url: `https://www.instahyre.com/search-jobs/` },
+    { name: "Hirist", mark: "H", note: "Engineering roles", url: `https://www.hirist.tech/` },
+    { name: "Foundit", mark: "F", note: "India listings", url: `https://www.foundit.in/search/${encodeURIComponent(primaryKeyword)}-jobs` },
+    { name: "YC Startups", mark: "Y", note: "Work at a Startup", url: `https://www.ycombinator.com/jobs?role=eng` },
   ];
 
   useEffect(() => {
@@ -344,6 +387,15 @@ export function RoleSignalApp() {
     return () => window.clearTimeout(timer);
   }, [toast]);
 
+  useEffect(() => {
+    if (!browserAlerts || typeof Notification === "undefined" || Notification.permission !== "granted" || !unreadAlerts.length) return;
+    const latest = unreadAlerts[0];
+    const key = `rolesignal-alert-${latest.id}`;
+    if (window.localStorage.getItem(key)) return;
+    new Notification(latest.title, { body: latest.summary, tag: latest.id });
+    window.localStorage.setItem(key, "shown");
+  }, [browserAlerts, unreadAlerts]);
+
   async function loadWorkspace() {
     try {
       const data = await api<Workspace>("/api/rolesignal/workspace");
@@ -353,6 +405,14 @@ export function RoleSignalApp() {
       setSources(data.sources || []);
       setSearchRuns(data.searchRuns || []);
       setDiscoveryRuns(data.discoveryRuns || []);
+      setAutomation(data.automation || null);
+      setAlerts(data.alerts || []);
+      if (data.automation) {
+        setScheduleEnabled(data.automation.enabled);
+        setCadenceHours(data.automation.cadenceHours);
+        setAlertThreshold(data.automation.minScore);
+        setBrowserAlerts(data.automation.browserAlerts);
+      }
       if (data.discoverySearches?.[0]) {
         const search = data.discoverySearches[0];
         setDiscoveryForm({
@@ -580,6 +640,86 @@ export function RoleSignalApp() {
     }
   }
 
+  async function saveSchedule(event?: FormEvent) {
+    event?.preventDefault();
+    setBusy("automation-save");
+    try {
+      const result = await api<{ automation: AutomationSettings }>("/api/rolesignal/automation/settings", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ enabled: scheduleEnabled, cadenceHours, minScore: alertThreshold, browserAlerts }),
+      });
+      setAutomation(result.automation);
+      setToast(scheduleEnabled ? `Scheduled discovery is active every ${cadenceHours} hours.` : "Scheduled discovery paused. Manual runs remain available.");
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "Automation settings could not be saved.");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function runScheduledNow() {
+    setBusy("automation-run");
+    try {
+      const result = await api<{ run: DiscoveryRun; automation: AutomationSettings }>("/api/rolesignal/automation/run-now", { method: "POST" });
+      setAutomation(result.automation);
+      await loadWorkspace();
+      setToast(`Automation checked ${result.run.discovered} listings and surfaced ${result.run.qualified} qualified matches.`);
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "The scheduled workflow could not run.");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function enableBrowserNotifications() {
+    if (typeof Notification === "undefined") {
+      setToast("This browser does not support desktop notifications.");
+      return;
+    }
+    const permission = await Notification.requestPermission();
+    if (permission === "granted") {
+      setBrowserAlerts(true);
+      setToast("Browser alerts enabled for new high-quality matches.");
+    } else {
+      setToast("Notification permission was not granted. Matches will still appear in the Signal inbox.");
+    }
+  }
+
+  async function markAlertsRead(alertId?: string) {
+    try {
+      const result = await api<{ alerts: JobAlert[] }>("/api/rolesignal/alerts/read", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ alertId }),
+      });
+      setAlerts(result.alerts);
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "The Signal inbox could not be updated.");
+    }
+  }
+
+  async function deepAnalyze(job: MatchJob) {
+    if (job.isSample) {
+      setToast("Import a live job before running full-description analysis.");
+      return;
+    }
+    setBusy(`enrich-${job.id}`);
+    try {
+      await api("/api/rolesignal/jobs/enrich", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ jobId: job.id }),
+      });
+      await loadWorkspace();
+      setToast("Full job description retrieved and rescored against the evidence graph.");
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "The official page could not be deeply analyzed.");
+    } finally {
+      setBusy("");
+    }
+  }
+
   async function saveAnswerVault(event: FormEvent) {
     event.preventDefault();
     setBusy("answer-vault");
@@ -690,7 +830,7 @@ export function RoleSignalApp() {
         <div className="workspace-switcher">
           <span className="workspace-avatar">RK</span>
           <span><strong>{profile.name}</strong><small>{profile.title}</small></span>
-          <b>v4</b>
+          <b>v5</b>
         </div>
         <nav aria-label="Primary navigation">
           <p className="nav-label">Workspace</p>
@@ -700,6 +840,7 @@ export function RoleSignalApp() {
               {item.id === "discovery" && discoveryRuns.length > 0 && <b>{discoveryRuns.length}</b>}
               {item.id === "matches" && <b>{liveJobs.length}</b>}
               {item.id === "runs" && searchRuns.length > 0 && <b>{searchRuns.length}</b>}
+              {item.id === "autopilot" && unreadAlerts.length > 0 && <b>{unreadAlerts.length}</b>}
               {item.id === "applications" && packets.length > 0 && <b>{packets.length}</b>}
             </button>
           ))}
@@ -722,7 +863,8 @@ export function RoleSignalApp() {
           </select>
           <div className="top-actions">
             <span className="secure-pill"><i /> Evidence-locked</span>
-            <span className="phase-pill">Phase 4</span>
+            <button className="signal-inbox-button" onClick={() => setView("autopilot")}><span>{unreadAlerts.length}</span> Signals</button>
+            <span className="phase-pill">Phase 5</span>
             <button className="avatar-button" aria-label="Career profile">RK</button>
           </div>
         </header>
@@ -740,6 +882,7 @@ export function RoleSignalApp() {
 
             {latestDiscovery && <section className="latest-run-strip discovery-strip"><div><span className={`run-status ${latestDiscovery.status.toLowerCase()}`}>{readableStatus(latestDiscovery.status)}</span><span><strong>Latest cross-portal discovery</strong><small>{latestDiscovery.discovered} listings checked / {latestDiscovery.imported} new / {latestDiscovery.qualified} qualified / {postedLabel(latestDiscovery.completedAt || latestDiscovery.startedAt)}</small></span></div><button className="text-button" onClick={() => setView("discovery")}>Open discovery -&gt;</button></section>}
             {latestRun && <section className="latest-run-strip"><div><span className={`run-status ${latestRun.status.toLowerCase()}`}>{readableStatus(latestRun.status)}</span><span><strong>Latest search run</strong><small>{latestRun.uniqueJobs} unique jobs / {latestRun.ready} ready to review / {postedLabel(latestRun.completedAt || latestRun.startedAt)}</small></span></div><button className="text-button" onClick={() => setView("runs")}>Open run center -&gt;</button></section>}
+            {unreadAlerts.length > 0 && <section className="signal-banner"><div><span className="signal-count">{unreadAlerts.length}</span><span><strong>New matches in your Signal inbox</strong><small>{unreadAlerts[0].title} / {unreadAlerts[0].detail.score || "Qualified"} match score</small></span></div><button className="text-button" onClick={() => setView("autopilot")}>Review signals -&gt;</button></section>}
 
             <section className="metric-grid" aria-label="Job search metrics">
               <Metric label="Live roles" value={String(liveJobs.length)} note={latestDiscovery ? `${latestDiscovery.providers.length} discovery providers` : "Ready for discovery"} trend={liveJobs.length ? "up" : "neutral"} />
@@ -803,9 +946,9 @@ export function RoleSignalApp() {
               <aside className="coverage-card">
                 <span className="card-kicker">Coverage map</span><h2>Three discovery lanes</h2><p>No single API covers the whole job market. RoleSignal combines the reliable paths without bypassing logins or bot protection.</p>
                 <div className="coverage-row"><span className="coverage-mark public">01</span><span><strong>Public job feeds</strong><small>Jobicy remote roles + Arbeitnow aggregated ATS listings</small></span><b>Automatic</b></div>
-                <div className="coverage-row"><span className="coverage-mark ats">02</span><span><strong>Company ATS boards</strong><small>{sources.length ? `${sources.length} Greenhouse / Lever boards connected` : "Connect Greenhouse or Lever boards"}</small></span><b>Automatic</b></div>
-                <div className="coverage-row"><span className="coverage-mark portal">03</span><span><strong>Signed-in portals</strong><small>LinkedIn, Naukri, Workday and Indeed via companion capture</small></span><b>Assisted</b></div>
-                <a className="download-button" href="/rolesignal-browser-companion.zip" download>Download Discovery Companion v0.4</a>
+                <div className="coverage-row"><span className="coverage-mark ats">02</span><span><strong>Company ATS boards</strong><small>{sources.length ? `${sources.length} Greenhouse / Lever / Ashby boards connected` : "Connect Greenhouse, Lever or Ashby boards"}</small></span><b>Automatic</b></div>
+                <div className="coverage-row"><span className="coverage-mark portal">03</span><span><strong>Signed-in portals</strong><small>Ten major job portals via companion capture</small></span><b>Assisted</b></div>
+                <a className="download-button" href="/rolesignal-browser-companion.zip" download>Download Discovery Companion v0.5</a>
               </aside>
             </section>
 
@@ -815,7 +958,7 @@ export function RoleSignalApp() {
             </section>
 
             <section className="capture-workflow">
-              <div className="capture-instructions"><span className="card-kicker">Browser-assisted capture</span><h2>Bring signed-in results into RoleSignal</h2><ol><li><b>1</b><span>Open a results page on LinkedIn, Naukri, Workday or Indeed.</span></li><li><b>2</b><span>Open the RoleSignal companion and choose <strong>Capture visible jobs</strong>.</span></li><li><b>3</b><span>Paste the copied discovery batch here and import it.</span></li></ol><p>The companion reads only the job cards visible in your active tab. It does not crawl hidden pages, bypass CAPTCHAs or submit applications.</p></div>
+              <div className="capture-instructions"><span className="card-kicker">Browser-assisted capture</span><h2>Bring signed-in results into RoleSignal</h2><ol><li><b>1</b><span>Open a results page on any supported portal.</span></li><li><b>2</b><span>Open the RoleSignal companion and choose <strong>Capture visible jobs</strong>.</span></li><li><b>3</b><span>Paste the copied discovery batch here and import it.</span></li></ol><p>The companion reads only the job cards visible in your active tab. It does not crawl hidden pages, bypass CAPTCHAs or submit applications.</p></div>
               <form className="capture-import-card" onSubmit={importPortalCapture}><div className="card-heading"><span className="card-kicker">Discovery batch</span><button type="button" onClick={() => void pasteCapture()}>Paste from clipboard</button></div><textarea required rows={9} value={captureText} onChange={(event) => setCaptureText(event.target.value)} placeholder={'Paste JSON from the browser companion\n{ "captureVersion": 1, "portal": "LinkedIn", "jobs": [...] }'} /><button className="primary-button wide" disabled={busy === "capture-import"}>{busy === "capture-import" ? "Normalizing and scoring..." : "Import captured jobs"}</button></form>
             </section>
 
@@ -840,7 +983,7 @@ export function RoleSignalApp() {
             </div>
             <div className="matches-layout">
               <div className="job-stack expanded">
-                {displayJobs.map((job) => <JobCard key={job.id} job={job} expanded onReview={() => void prepareApplication(job)} busy={busy === `prepare-${job.id}`} />)}
+                {displayJobs.map((job) => <JobCard key={job.id} job={job} expanded onReview={() => void prepareApplication(job)} onAnalyze={() => void deepAnalyze(job)} busy={busy === `prepare-${job.id}`} analyzing={busy === `enrich-${job.id}`} />)}
               </div>
               <aside className="score-legend">
                 <span className="card-kicker">100-point rubric</span><h3>Signal over keywords.</h3><p>A language gap can be learned. An engineering-domain mismatch is treated much more seriously.</p>
@@ -852,11 +995,11 @@ export function RoleSignalApp() {
 
         {view === "sources" && (
           <div className="page inner-page">
-            <PageTitle eyebrow="Live ingestion" title="Bring official jobs into one signal" copy="Scan public Greenhouse and Lever boards, or import a single official job page and full description." action={sources.length ? (busy === "scan-all" ? "Running all sources..." : "Run all connected") : undefined} actionDisabled={busy === "scan-all"} onAction={() => void runAllSources()} />
+            <PageTitle eyebrow="Live ingestion" title="Bring official jobs into one signal" copy="Scan public Greenhouse, Lever and Ashby boards, or import a single official job page and full description." action={sources.length ? (busy === "scan-all" ? "Running all sources..." : "Run all connected") : undefined} actionDisabled={busy === "scan-all"} onAction={() => void runAllSources()} />
             <div className="source-grid">
               <form className="source-card" onSubmit={scanSource}>
-                <span className="card-kicker">ATS board scan</span><h3>Connect a company board</h3><p>Use the company token from a Greenhouse or Lever careers URL. Public job listings are fetched without application credentials.</p>
-                <label>Provider<select value={sourceForm.provider} onChange={(event) => setSourceForm({ ...sourceForm, provider: event.target.value })}><option value="greenhouse">Greenhouse</option><option value="lever">Lever</option></select></label>
+                <span className="card-kicker">ATS board scan</span><h3>Connect a company board</h3><p>Use the company token from a Greenhouse, Lever or Ashby careers URL. Public job listings are fetched without application credentials.</p>
+                <label>Provider<select value={sourceForm.provider} onChange={(event) => setSourceForm({ ...sourceForm, provider: event.target.value })}><option value="greenhouse">Greenhouse</option><option value="lever">Lever</option><option value="ashby">Ashby</option></select></label>
                 <label>Company token<input required value={sourceForm.token} onChange={(event) => setSourceForm({ ...sourceForm, token: event.target.value })} placeholder="example-company" /></label>
                 <label>Company name<input value={sourceForm.label} onChange={(event) => setSourceForm({ ...sourceForm, label: event.target.value })} placeholder="Example Company" /></label>
                 <button className="primary-button wide" disabled={busy === "source-scan"}>{busy === "source-scan" ? "Scanning and scoring..." : "Scan published roles"}</button>
@@ -874,14 +1017,14 @@ export function RoleSignalApp() {
 
             {scanReport && <section className="run-report"><div><span className="card-kicker">Latest run report</span><h3>{scanReport.source} via {readableStatus(scanReport.provider)}</h3></div><Metric label="Discovered" value={String(scanReport.discovered)} note="Published jobs" trend="neutral" /><Metric label="Unique" value={String(scanReport.unique)} note={`${scanReport.duplicates} duplicates`} trend="up" /><Metric label="Strong" value={String(scanReport.strong)} note="Score 82+" trend="up" /><Metric label="Ready" value={String(scanReport.ready)} note="Score 75+" trend="up" /><Metric label="Skipped" value={String(scanReport.skipped)} note="Reasons retained" trend="neutral" /></section>}
 
-            {sources.length > 0 && <section className="connected-sources"><div className="section-heading"><div><span className="eyebrow">Persistent sources</span><h2>Connected career boards</h2></div></div>{sources.map((source) => <div className="source-row" key={source.id}><span className="source-logo">{source.provider === "greenhouse" ? "GH" : "LV"}</span><span><strong>{source.label}</strong><small>{readableStatus(source.provider)} / {source.source_token}</small></span><b>{source.last_scanned_at ? `Scanned ${postedLabel(source.last_scanned_at)}` : "Ready"}</b><button className="text-button" disabled={busy === `source-remove-${source.id}`} onClick={() => void disconnectSource(source.id)}>Disconnect</button></div>)}</section>}
+            {sources.length > 0 && <section className="connected-sources"><div className="section-heading"><div><span className="eyebrow">Persistent sources</span><h2>Connected career boards</h2></div></div>{sources.map((source) => <div className="source-row" key={source.id}><span className="source-logo">{source.provider === "greenhouse" ? "GH" : source.provider === "lever" ? "LV" : "AS"}</span><span><strong>{source.label}</strong><small>{readableStatus(source.provider)} / {source.source_token}</small></span><b>{source.last_scanned_at ? `Scanned ${postedLabel(source.last_scanned_at)}` : "Ready"}</b><button className="text-button" disabled={busy === `source-remove-${source.id}`} onClick={() => void disconnectSource(source.id)}>Disconnect</button></div>)}</section>}
           </div>
         )}
 
         {view === "runs" && (
           <div className="page inner-page">
             <PageTitle eyebrow="Search operations" title="One run. Every connected source." copy="Scan all active boards, deduplicate listings, score the full set and keep a durable report of what deserves attention." action={sources.length ? (busy === "scan-all" ? "Running search..." : "Run all sources") : "Connect a source"} actionDisabled={busy === "scan-all"} onAction={() => sources.length ? void runAllSources() : setView("sources")} />
-            {!latestRun ? <EmptyState title="No full search run yet" copy="Connect a public Greenhouse or Lever board, then run the complete search workflow from here." action={sources.length ? "Run all sources" : "Connect a source"} onAction={() => sources.length ? void runAllSources() : setView("sources")} /> : <>
+            {!latestRun ? <EmptyState title="No full search run yet" copy="Connect a public Greenhouse, Lever or Ashby board, then run the complete search workflow from here." action={sources.length ? "Run all sources" : "Connect a source"} onAction={() => sources.length ? void runAllSources() : setView("sources")} /> : <>
               <section className="run-hero-card">
                 <div className="run-hero-heading"><div><span className="card-kicker">Latest run / {postedLabel(latestRun.completedAt || latestRun.startedAt)}</span><h2>{latestRun.ready} roles ready for deliberate review</h2><p>{latestRun.sourceCount} sources scanned. Duplicates, hard filters and scoring decisions are retained in the report.{latestRun.report.autoStaged?.length ? ` ${latestRun.report.autoStaged.length} qualified application kit${latestRun.report.autoStaged.length === 1 ? " was" : "s were"} staged for review.` : ""}</p></div><span className={`run-status ${latestRun.status.toLowerCase()}`}>{readableStatus(latestRun.status)}</span></div>
                 <div className="run-summary-grid"><Metric label="Discovered" value={String(latestRun.jobsDiscovered)} note={`${latestRun.uniqueJobs} unique`} trend="neutral" /><Metric label="Analyzed" value={String(latestRun.analyzed)} note="Evidence scored" trend="up" /><Metric label="Exceptional" value={String(latestRun.exceptional)} note="Score 90+" trend="up" /><Metric label="Strong" value={String(latestRun.strong)} note="Score 82-89" trend="up" /><Metric label="Needs input" value={String(latestRun.needsInput)} note="Approval blocked" trend={latestRun.needsInput ? "warn" : "up"} /></div>
@@ -899,7 +1042,15 @@ export function RoleSignalApp() {
 
         {view === "autopilot" && (
           <div className="page inner-page">
-            <PageTitle eyebrow="Approval-first automation" title="Automation that knows where to stop" copy="RoleSignal can stage qualified applications and fill supported fields. It never guesses, bypasses protection or clicks final submit." />
+            <PageTitle eyebrow="Phase 5 automation" title="Your job search keeps watch" copy="An hourly Worker checks whether your saved search is due, scores new roles against the evidence graph and places only qualified matches in the Signal inbox." action={busy === "automation-run" ? "Running now..." : "Run automation now"} actionDisabled={busy === "automation-run"} onAction={() => void runScheduledNow()} />
+            <form className="automation-command-card" onSubmit={saveSchedule}>
+              <div className="automation-state"><span className={scheduleEnabled ? "automation-orb on" : "automation-orb"} /><span><strong>{scheduleEnabled ? "Scheduled discovery is active" : "Scheduled discovery is paused"}</strong><small>{automation?.lastRunAt ? `Last run ${postedLabel(automation.lastRunAt)} / next ${postedLabel(automation.nextRunAt)}` : "Save a cadence to begin background discovery."}</small></span></div>
+              <label>Cadence<select value={cadenceHours} onChange={(event) => setCadenceHours(Number(event.target.value))}><option value={6}>Every 6 hours</option><option value={12}>Every 12 hours</option><option value={24}>Daily</option><option value={72}>Every 3 days</option></select></label>
+              <label>Alert threshold<input type="number" min={75} max={95} value={alertThreshold} onChange={(event) => setAlertThreshold(Number(event.target.value))} /></label>
+              <button type="button" className={scheduleEnabled ? "switch large on" : "switch large"} onClick={() => setScheduleEnabled(!scheduleEnabled)} aria-label="Toggle scheduled discovery"><span /></button>
+              <button className="primary-button" disabled={busy === "automation-save"}>{busy === "automation-save" ? "Saving..." : "Save schedule"}</button>
+            </form>
+            {automation?.lastError && <section className="automation-error"><strong>Latest automation issue</strong><span>{automation.lastError}</span></section>}
             <div className="autopilot-grid">
               <section className="rules-card">
                 <div className="rules-hero"><div><span className="pulse-dot" /><span><strong>{autoApply ? "Auto-stage is active" : "Review mode is active"}</strong><small>{autoApply ? "Qualified jobs can enter the preparation queue." : "You choose every job before preparation."}</small></span></div><button className={autoApply ? "switch large on" : "switch large"} onClick={() => { const next = !autoApply; setAutoApply(next); void saveRules(next); }}><span /></button></div>
@@ -916,6 +1067,10 @@ export function RoleSignalApp() {
                 <a className="download-button" href="/rolesignal-browser-companion.zip" download>Download Chrome companion</a>
               </aside>
             </div>
+            <section className="signal-inbox">
+              <div className="section-heading"><div><span className="eyebrow">Signal inbox</span><h2>New matches, already explained</h2></div><div className="inbox-actions"><button className="secondary-button" onClick={() => void enableBrowserNotifications()}>Enable browser alerts</button>{unreadAlerts.length > 0 && <button className="text-button" onClick={() => void markAlertsRead()}>Mark all read</button>}</div></div>
+              {!alerts.length ? <div className="inbox-empty"><strong>No signals yet</strong><span>Run discovery or enable the schedule. Only roles above your alert threshold appear here.</span></div> : <div className="signal-list">{alerts.slice(0, 20).map((alert) => <article className={alert.status === "UNREAD" ? "signal-row unread" : "signal-row"} key={alert.id}><span className="signal-score">{alert.detail.score || "–"}</span><span><strong>{alert.title}</strong><small>{alert.summary}</small></span><span className="signal-time">{postedLabel(alert.createdAt)}</span><button className="text-button" onClick={() => { void markAlertsRead(alert.id); setView("matches"); }}>Review -&gt;</button></article>)}</div>}
+            </section>
           </div>
         )}
 
@@ -956,14 +1111,14 @@ function Metric({ label, value, note, trend }: { label: string; value: string; n
   return <div className="metric-card"><span>{label}</span><strong>{value}</strong><small className={trend}>{trend === "up" ? "↗" : trend === "warn" ? "!" : "•"} {note}</small></div>;
 }
 
-function JobCard({ job, onReview, expanded = false, busy = false }: { job: MatchJob; onReview: () => void; expanded?: boolean; busy?: boolean }) {
+function JobCard({ job, onReview, onAnalyze, expanded = false, busy = false, analyzing = false }: { job: MatchJob; onReview: () => void; onAnalyze?: () => void; expanded?: boolean; busy?: boolean; analyzing?: boolean }) {
   const ringStyle = { "--score": `${job.score * 3.6}deg` } as CSSProperties;
   const initials = job.company.split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase();
   return <article className={expanded ? "job-card expanded" : "job-card"}>
     <div className="job-main"><div className="company-logo green">{initials}</div><div className="job-info"><div className="job-company"><span>{job.company}</span>{job.highPriority && <i>High priority</i>}{job.isSample && <i>Sample</i>}</div><h3>{job.role}</h3><p>{job.location}<b>·</b>{job.workMode}<b>·</b>{postedLabel(job.postedDate)}<b>·</b>{job.platform}</p><div className="tag-row">{job.matchingExperience.slice(0, 3).map((tag) => <span key={tag}>{tag}</span>)}</div></div></div>
     <div className="job-actions"><div className="score-ring" style={ringStyle}><span><b>{job.score}</b><small>match</small></span></div></div>
-    {expanded && <div className="job-explanation"><div><span className="fit-label">Matching experience</span>{job.matchingExperience.length ? job.matchingExperience.slice(0, 3).map((item) => <p key={item}>{item}</p>) : <p>No verified overlap was strong enough to cite.</p>}</div><div><span className="gap-label">Missing / watch-outs</span>{[...job.missingRequirements, ...job.redFlags].length ? [...job.missingRequirements, ...job.redFlags].slice(0, 3).map((item) => <p key={item}>{item}</p>) : <p>No material gap detected.</p>}</div></div>}
-    <div className="job-footer"><span className="match-class"><i />{job.classification} match</span><span>{readableStatus(job.status)}</span><button disabled={busy || job.status === "SKIPPED"} onClick={onReview}>{busy ? "Preparing..." : job.status === "SKIPPED" ? "Not eligible" : "Prepare application"} -&gt;</button></div>
+    {expanded && <div className="job-explanation"><div><span className="fit-label">Evidence-semantic matches</span>{job.semanticMatches?.length ? job.semanticMatches.slice(0, 3).map((item) => <p key={item.requirement}><strong>{item.requirement}</strong> — {item.evidence}</p>) : job.matchingExperience.length ? job.matchingExperience.slice(0, 3).map((item) => <p key={item}>{item}</p>) : <p>No verified overlap was strong enough to cite.</p>}</div><div><span className="gap-label">Missing / watch-outs</span>{[...job.missingRequirements, ...job.redFlags].length ? [...job.missingRequirements, ...job.redFlags].slice(0, 3).map((item) => <p key={item}>{item}</p>) : <p>No material gap detected.</p>}</div></div>}
+    <div className="job-footer"><span className="match-class"><i />{job.classification} match{job.enrichedAt ? " / Full JD" : ""}</span><span>{readableStatus(job.status)}</span>{onAnalyze && <button className="analyze-action" disabled={analyzing || job.isSample} onClick={onAnalyze}>{analyzing ? "Analyzing..." : job.enrichedAt ? "Re-analyze JD" : "Deep-analyze JD"}</button>}<button disabled={busy || job.status === "SKIPPED"} onClick={onReview}>{busy ? "Preparing..." : job.status === "SKIPPED" ? "Not eligible" : "Prepare application"} -&gt;</button></div>
   </article>;
 }
 

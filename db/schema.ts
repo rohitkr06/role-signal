@@ -211,3 +211,35 @@ export const discoveryRuns = sqliteTable("discovery_runs", {
   index("idx_discovery_runs_user_completed").on(table.userId, table.completedAt),
   index("idx_discovery_runs_search").on(table.searchId),
 ]);
+
+export const automationSettings = sqliteTable("automation_settings", {
+  userId: text("user_id").primaryKey(),
+  enabled: integer("enabled", { mode: "boolean" }).notNull(),
+  cadenceHours: integer("cadence_hours").notNull(),
+  minScore: integer("min_score").notNull(),
+  browserAlerts: integer("browser_alerts", { mode: "boolean" }).notNull(),
+  lastRunAt: text("last_run_at"),
+  nextRunAt: text("next_run_at").notNull(),
+  lastStatus: text("last_status").notNull(),
+  lastError: text("last_error"),
+  updatedAt: text("updated_at").notNull(),
+}, (table) => [
+  index("idx_automation_settings_due").on(table.enabled, table.nextRunAt),
+]);
+
+export const jobAlerts = sqliteTable("job_alerts", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull(),
+  jobId: text("job_id").notNull(),
+  discoveryRunId: text("discovery_run_id"),
+  kind: text("kind").notNull(),
+  status: text("status").notNull(),
+  title: text("title").notNull(),
+  summary: text("summary").notNull(),
+  detailJson: text("detail_json").notNull(),
+  createdAt: text("created_at").notNull(),
+  readAt: text("read_at"),
+}, (table) => [
+  uniqueIndex("idx_job_alerts_user_job_kind").on(table.userId, table.jobId, table.kind),
+  index("idx_job_alerts_user_status_created").on(table.userId, table.status, table.createdAt),
+]);

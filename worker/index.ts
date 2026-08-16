@@ -31,12 +31,18 @@ interface ExecutionContext {
   passThroughOnException(): void;
 }
 
+interface RoleSignalScheduledController {
+  scheduledTime: number;
+  cron: string;
+  noRetry(): void;
+}
+
 const worker = {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
     if (url.pathname.startsWith("/api/rolesignal/")) {
-      return handleRoleSignalApi(request, env, url);
+      return handleRoleSignalApi(request, env, url, ctx);
     }
 
     if (url.pathname === "/_vinext/image") {
@@ -51,6 +57,10 @@ const worker = {
     }
 
     return handler.fetch(request, env, ctx);
+  },
+  async scheduled(_controller: RoleSignalScheduledController, env: Env) {
+    await ensureSchema(env);
+    await executeDueAutomations(env, new Date().toISOString());
   },
 };
 
@@ -230,6 +240,31 @@ const schemaStatements = [
     started_at TEXT NOT NULL,
     completed_at TEXT
   )`,
+  `CREATE TABLE IF NOT EXISTS automation_settings (
+    user_id TEXT PRIMARY KEY,
+    enabled INTEGER NOT NULL,
+    cadence_hours INTEGER NOT NULL,
+    min_score INTEGER NOT NULL,
+    browser_alerts INTEGER NOT NULL,
+    last_run_at TEXT,
+    next_run_at TEXT NOT NULL,
+    last_status TEXT NOT NULL,
+    last_error TEXT,
+    updated_at TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS job_alerts (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    job_id TEXT NOT NULL,
+    discovery_run_id TEXT,
+    kind TEXT NOT NULL,
+    status TEXT NOT NULL,
+    title TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    detail_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    read_at TEXT
+  )`,
   `CREATE INDEX IF NOT EXISTS idx_resumes_user_id ON resumes(user_id)`,
   `CREATE INDEX IF NOT EXISTS idx_jobs_match_score ON jobs(match_score DESC)`,
   `CREATE INDEX IF NOT EXISTS idx_applications_user_status ON applications(user_id, status)`,
@@ -248,6 +283,9 @@ const schemaStatements = [
   `CREATE INDEX IF NOT EXISTS idx_discovery_searches_user_updated ON discovery_searches(user_id, updated_at DESC)`,
   `CREATE INDEX IF NOT EXISTS idx_discovery_runs_user_completed ON discovery_runs(user_id, completed_at DESC)`,
   `CREATE INDEX IF NOT EXISTS idx_discovery_runs_search ON discovery_runs(search_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_automation_settings_due ON automation_settings(enabled, next_run_at)`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_job_alerts_user_job_kind ON job_alerts(user_id, job_id, kind)`,
+  `CREATE INDEX IF NOT EXISTS idx_job_alerts_user_status_created ON job_alerts(user_id, status, created_at DESC)`,
 ] as const;
 
 async function ensureSchema(env: Env) {
@@ -382,6 +420,36 @@ function rowToDiscoveryRun(row: Record<string, unknown>) {
     report: parseJson(row.report_json, {}),
     startedAt: row.started_at,
     completedAt: row.completed_at,
+  };
+}
+
+function rowToAutomation(row?: Record<string, unknown> | null) {
+  if (!row) return null;
+  return {
+    enabled: Boolean(row.enabled),
+    cadenceHours: Number(row.cadence_hours),
+    minScore: Number(row.min_score),
+    browserAlerts: Boolean(row.browser_alerts),
+    lastRunAt: row.last_run_at,
+    nextRunAt: row.next_run_at,
+    lastStatus: row.last_status,
+    lastError: row.last_error,
+    updatedAt: row.updated_at,
+  };
+}
+
+function rowToAlert(row: Record<string, unknown>) {
+  return {
+    id: row.id,
+    jobId: row.job_id,
+    discoveryRunId: row.discovery_run_id,
+    kind: row.kind,
+    status: row.status,
+    title: row.title,
+    summary: row.summary,
+    detail: parseJson(row.detail_json, {}),
+    createdAt: row.created_at,
+    readAt: row.read_at,
   };
 }
 
@@ -546,15 +614,26 @@ async function safeFetch(urlValue: string, accept = "text/html,application/json"
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 12_000);
   try {
-    const response = await fetch(target, {
-      headers: { accept, "user-agent": "RoleSignal/4.0 job-discovery assistant" },
-      redirect: "follow",
-      signal: controller.signal,
-    });
-    if (!response.ok) throw new Error(`The job source returned ${response.status}.`);
-    const length = Number(response.headers.get("content-length") ?? 0);
-    if (length > 3_000_000) throw new Error("The job page is too large to import safely.");
-    return response;
+    let current = target;
+    for (let redirect = 0; redirect <= 4; redirect += 1) {
+      const response = await fetch(current, {
+        headers: { accept, "user-agent": "RoleSignal/5.0 evidence-semantic job assistant" },
+        redirect: "manual",
+        signal: controller.signal,
+      });
+      if (response.status >= 300 && response.status < 400) {
+        const location = response.headers.get("location");
+        if (!location || redirect === 4) throw new Error("The job source redirected too many times.");
+        current = new URL(location, current);
+        if (current.protocol !== "https:" || isPrivateHostname(current.hostname)) throw new Error("The job source redirected to an unsafe address.");
+        continue;
+      }
+      if (!response.ok) throw new Error(`The job source returned ${response.status}.`);
+      const length = Number(response.headers.get("content-length") ?? 0);
+      if (length > 3_000_000) throw new Error("The job page is too large to import safely.");
+      return response;
+    }
+    throw new Error("The job source could not be reached.");
   } finally {
     clearTimeout(timer);
   }
@@ -564,6 +643,100 @@ function titleFromHtml(html: string) {
   const og = html.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i)?.[1];
   const title = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1];
   return stripHtml(og || title || "").split(/\s+[|–—]\s+/)[0].trim();
+}
+
+function metaContent(html: string, name: string) {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return stripHtml(
+    html.match(new RegExp(`<meta[^>]+(?:name|property)=["']${escaped}["'][^>]+content=["']([^"']+)["']`, "i"))?.[1] ||
+    html.match(new RegExp(`<meta[^>]+content=["']([^"']+)["'][^>]+(?:name|property)=["']${escaped}["']`, "i"))?.[1] ||
+    "",
+  );
+}
+
+function findJobPosting(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object") return null;
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const match = findJobPosting(item);
+      if (match) return match;
+    }
+    return null;
+  }
+  const object = value as Record<string, unknown>;
+  const type = object["@type"];
+  if (type === "JobPosting" || (Array.isArray(type) && type.includes("JobPosting"))) return object;
+  for (const child of Object.values(object)) {
+    const match = findJobPosting(child);
+    if (match) return match;
+  }
+  return null;
+}
+
+function jobPostingFromHtml(html: string) {
+  for (const match of html.matchAll(/<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)) {
+    try {
+      const posting = findJobPosting(JSON.parse(match[1]));
+      if (posting) return posting;
+    } catch {
+      // Continue to the next structured-data block.
+    }
+  }
+  return null;
+}
+
+function structuredLocation(posting: Record<string, unknown> | null, fallback: string) {
+  if (!posting) return fallback;
+  if (asString(posting.jobLocationType).toUpperCase() === "TELECOMMUTE") return "Remote";
+  const locations = Array.isArray(posting.jobLocation) ? posting.jobLocation : posting.jobLocation ? [posting.jobLocation] : [];
+  const values = locations.map((location) => {
+    if (!location || typeof location !== "object") return "";
+    const addressValue = (location as Record<string, unknown>).address;
+    if (typeof addressValue === "string") return addressValue;
+    const address = addressValue && typeof addressValue === "object" ? addressValue as Record<string, unknown> : {};
+    return [address.addressLocality, address.addressRegion, address.addressCountry].map((item) => asString(item)).filter(Boolean).join(", ");
+  }).filter(Boolean);
+  return values.join(" / ") || fallback;
+}
+
+async function enrichSavedJob(env: Env, user: { id: string; email: string; name: string }, jobId: string, now: string) {
+  const row = await env.DB.prepare("SELECT * FROM job_matches WHERE id = ? AND user_id = ?").bind(jobId, user.id).first<Record<string, unknown>>();
+  if (!row) throw new Error("That job is no longer available in your workspace.");
+  const response = await safeFetch(asString(row.application_url), "text/html,application/xhtml+xml");
+  const html = (await response.text()).slice(0, 3_000_000);
+  const posting = jobPostingFromHtml(html);
+  const structuredDescription = stripHtml(asString(posting?.description));
+  const pageDescription = metaContent(html, "description") || metaContent(html, "og:description");
+  const bodyDescription = stripHtml(html).slice(0, 120_000);
+  const description = [structuredDescription, pageDescription, bodyDescription, asString(row.description)]
+    .sort((a, b) => b.length - a.length)[0]
+    .slice(0, 120_000);
+  if (description.length < 120) throw new Error("The official page did not expose enough job-description text. Paste the full description during import instead.");
+  const location = structuredLocation(posting, asString(row.location));
+  const input: JobInput = {
+    company: asString(row.company),
+    role: asString(row.role),
+    location,
+    workMode: inferWorkMode(location, description),
+    platform: asString(row.platform),
+    applicationUrl: asString(row.application_url),
+    postedDate: asString(posting?.datePosted, asString(row.posted_date)),
+    description,
+    compensation: asString(row.compensation),
+  };
+  const scored = scoreJob(await profileForUser(env, user), input);
+  await env.DB.prepare(
+    `UPDATE job_matches SET location = ?, work_mode = ?, posted_date = ?, description = ?,
+     match_score = ?, classification = ?, status = ?, score_json = ?, updated_at = ?
+     WHERE id = ? AND user_id = ?`,
+  ).bind(
+    scored.location, scored.workMode, scored.postedDate || null, scored.description,
+    scored.score, scored.classification, scored.status,
+    JSON.stringify({ ...scored, enrichedAt: now, enrichmentSource: response.url || input.applicationUrl }),
+    now, jobId, user.id,
+  ).run();
+  const updated = await env.DB.prepare("SELECT * FROM job_matches WHERE id = ? AND user_id = ?").bind(jobId, user.id).first<Record<string, unknown>>();
+  return updated ? rowToJob(updated) : null;
 }
 
 function companyFromUrl(urlValue: string) {
@@ -633,6 +806,24 @@ type LeverJob = {
   lists?: Array<{ text?: string; content?: string }>;
 };
 
+type AshbyJob = {
+  title?: string;
+  location?: string;
+  secondaryLocations?: Array<{ location?: string }>;
+  isListed?: boolean;
+  isRemote?: boolean;
+  workplaceType?: "OnSite" | "Remote" | "Hybrid";
+  descriptionHtml?: string;
+  descriptionPlain?: string;
+  publishedAt?: string;
+  jobUrl?: string;
+  applyUrl?: string;
+  compensation?: {
+    compensationTierSummary?: string;
+    scrapeableCompensationSalarySummary?: string;
+  };
+};
+
 async function scanSource(
   body: Record<string, unknown>,
   env: Env,
@@ -640,10 +831,10 @@ async function scanSource(
   now: string,
 ) {
   const provider = asString(body.provider).toLowerCase();
-  const token = asString(body.token).toLowerCase();
+  const token = asString(body.token);
   const label = asString(body.label, token.replace(/[-_]/g, " ").replace(/\b\w/g, (value) => value.toUpperCase()));
-  if (!new Set(["greenhouse", "lever"]).has(provider)) throw new Error("Choose Greenhouse or Lever.");
-  if (!/^[a-z0-9][a-z0-9_-]{1,79}$/.test(token)) throw new Error("Enter the company board token from its careers URL.");
+  if (!new Set(["greenhouse", "lever", "ashby"]).has(provider)) throw new Error("Choose Greenhouse, Lever or Ashby.");
+  if (!/^[a-z0-9][a-z0-9_-]{1,79}$/i.test(token)) throw new Error("Enter the company board token from its careers URL.");
 
   const profile = await profileForUser(env, user);
   let inputs: JobInput[] = [];
@@ -661,7 +852,7 @@ async function scanSource(
         description,
       };
     });
-  } else {
+  } else if (provider === "lever") {
     const response = await safeFetch(`https://api.lever.co/v0/postings/${encodeURIComponent(token)}?mode=json&limit=100`, "application/json");
     const payload = await response.json() as LeverJob[];
     inputs = payload.slice(0, 100).map((job) => {
@@ -677,6 +868,20 @@ async function scanSource(
         applicationUrl: job.hostedUrl || job.applyUrl || `https://jobs.lever.co/${token}/${job.id}`,
         postedDate: job.createdAt ? new Date(job.createdAt).toISOString() : undefined,
         description,
+      };
+    });
+  } else {
+    const response = await safeFetch(`https://api.ashbyhq.com/posting-api/job-board/${encodeURIComponent(token)}?includeCompensation=true`, "application/json");
+    const payload = await response.json() as { jobs?: AshbyJob[] };
+    inputs = (payload.jobs ?? []).filter((job) => job.isListed !== false).slice(0, 100).map((job) => {
+      const description = stripHtml(job.descriptionPlain || job.descriptionHtml || "");
+      const location = [job.location, ...(job.secondaryLocations ?? []).map((item) => item.location)].filter(Boolean).join(" / ") || "Not specified";
+      const workMode = job.workplaceType === "OnSite" ? "On-site" : job.workplaceType || (job.isRemote ? "Remote" : inferWorkMode(location, description));
+      return {
+        externalId: job.jobUrl || job.applyUrl, company: label, role: asString(job.title, "Untitled role"), location,
+        workMode, platform: "Ashby", applicationUrl: job.jobUrl || job.applyUrl || `https://jobs.ashbyhq.com/${encodeURIComponent(token)}`,
+        postedDate: job.publishedAt, description,
+        compensation: job.compensation?.scrapeableCompensationSalarySummary || job.compensation?.compensationTierSummary,
       };
     });
   }
@@ -957,6 +1162,45 @@ async function autoStageJobs(
   return staged;
 }
 
+async function createJobAlerts(
+  env: Env,
+  userId: string,
+  runId: string,
+  rows: Array<Record<string, unknown>>,
+  threshold: number,
+  now: string,
+) {
+  const candidates = rows
+    .filter((row) => Number(row.match_score) >= threshold && row.status !== "SKIPPED")
+    .sort((a, b) => Number(b.match_score) - Number(a.match_score))
+    .slice(0, 12);
+  if (!candidates.length) return 0;
+  const results = await env.DB.batch(candidates.map((row) => {
+    const job = rowToJob(row) as Record<string, unknown>;
+    const evidence = Array.isArray(job.matchingExperience) ? job.matchingExperience.slice(0, 2).join(" ") : "Strong verified backend evidence overlap.";
+    const alertJob = {
+      id: job.id, company: job.company, role: job.role, location: job.location,
+      workMode: job.workMode, platform: job.platform, applicationUrl: job.applicationUrl,
+      score: job.score, classification: job.classification, status: job.status,
+      matchingExperience: Array.isArray(job.matchingExperience) ? job.matchingExperience.slice(0, 3) : [],
+      semanticMatches: Array.isArray(job.semanticMatches) ? job.semanticMatches.slice(0, 3) : [],
+    };
+    return env.DB.prepare(
+      `INSERT INTO job_alerts
+       (id, user_id, job_id, discovery_run_id, kind, status, title, summary, detail_json, created_at, read_at)
+       VALUES (?, ?, ?, ?, 'NEW_MATCH', 'UNREAD', ?, ?, ?, ?, NULL)
+       ON CONFLICT(user_id, job_id, kind) DO NOTHING`,
+    ).bind(
+      crypto.randomUUID(), userId, row.id, runId,
+      `${row.company}: ${row.role}`,
+      `${row.match_score}/100 ${row.classification} match. ${evidence}`.slice(0, 600),
+      JSON.stringify({ job: alertJob, score: row.match_score, classification: row.classification }),
+      now,
+    );
+  }));
+  return results.reduce((total, result) => total + Number(result.meta?.changes ?? 0), 0);
+}
+
 async function runDiscovery(
   body: Record<string, unknown>,
   env: Env,
@@ -964,21 +1208,23 @@ async function runDiscovery(
   startedAt: string,
 ) {
   const config = discoveryConfig(body);
+  const mode = body.mode === "SCHEDULED" ? "SCHEDULED" : "PUBLIC_FEEDS";
+  const force = body.force === true || mode === "SCHEDULED";
   const searchRow = await upsertDiscoverySearch(env, user.id, config, startedAt);
   const searchId = asString(searchRow?.id);
   const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
   const recent = await env.DB.prepare(
     "SELECT * FROM discovery_runs WHERE user_id = ? AND search_id = ? AND mode = 'PUBLIC_FEEDS' AND completed_at >= ? ORDER BY completed_at DESC LIMIT 1",
   ).bind(user.id, searchId, oneHourAgo).first<Record<string, unknown>>();
-  if (recent) return { ...rowToDiscoveryRun(recent), cached: true };
+  if (!force && recent) return { ...rowToDiscoveryRun(recent), cached: true };
 
   const runId = crypto.randomUUID();
   await env.DB.prepare(
     `INSERT INTO discovery_runs
      (id, user_id, search_id, mode, status, providers_json, discovered, imported,
       duplicates, qualified, report_json, started_at, completed_at)
-     VALUES (?, ?, ?, 'PUBLIC_FEEDS', 'RUNNING', '[]', 0, 0, 0, 0, '{}', ?, NULL)`,
-  ).bind(runId, user.id, searchId, startedAt).run();
+     VALUES (?, ?, ?, ?, 'RUNNING', '[]', 0, 0, 0, 0, '{}', ?, NULL)`,
+  ).bind(runId, user.id, searchId, mode, startedAt).run();
 
   const keyword = config.keywords[0]?.replace(/\b(engineer|engineering|developer)\b/gi, "").trim() || "backend";
   const jobicyUrl = new URL("https://jobicy.com/api/v2/remote-jobs");
@@ -1075,6 +1321,18 @@ async function runDiscovery(
     });
   }
 
+  const touchedRows = await env.DB.prepare(
+    "SELECT * FROM job_matches WHERE user_id = ? AND updated_at >= ? ORDER BY match_score DESC LIMIT 300",
+  ).bind(user.id, startedAt).all<Record<string, unknown>>();
+  const includedIds = new Set(runRows.map((row) => asString(row.id)));
+  for (const row of touchedRows.results) {
+    const id = asString(row.id);
+    if (!includedIds.has(id)) {
+      runRows.push(row);
+      includedIds.add(id);
+    }
+  }
+
   runRows.sort((a, b) => Number(b.match_score) - Number(a.match_score));
   const qualified = runRows.filter((row) => Number(row.match_score) >= config.minScore && row.status !== "SKIPPED");
   const autoStaged = await autoStageJobs(runRows, env, user, config.minScore);
@@ -1086,11 +1344,14 @@ async function runDiscovery(
     topOpportunities: topRows.map(rowToJob),
     highestPriority: selectHighestPriority(qualified, 3).map(rowToJob),
     autoStaged,
+    alertsCreated: 0,
   };
   const completedAt = new Date().toISOString();
   const status = failures.length === providerReports.length + failures.length ? "FAILED" : failures.length ? "PARTIAL" : "COMPLETED";
   const discovered = providerReports.reduce((sum, report) => sum + report.discovered, 0);
   const imported = providerReports.reduce((sum, report) => sum + report.imported, 0);
+  const alertsCreated = await createJobAlerts(env, user.id, runId, qualified, config.minScore, completedAt);
+  report.alertsCreated = alertsCreated;
   await env.DB.batch([
     env.DB.prepare(
       `UPDATE discovery_runs SET status = ?, providers_json = ?, discovered = ?, imported = ?,
@@ -1100,7 +1361,7 @@ async function runDiscovery(
       .bind(completedAt, completedAt, searchId, user.id),
   ]);
   return rowToDiscoveryRun({
-    id: runId, user_id: user.id, search_id: searchId, mode: "PUBLIC_FEEDS", status,
+    id: runId, user_id: user.id, search_id: searchId, mode, status,
     providers_json: JSON.stringify(providerReports), discovered, imported, duplicates,
     qualified: qualified.length, report_json: JSON.stringify(report), started_at: startedAt, completed_at: completedAt,
   });
@@ -1146,6 +1407,8 @@ async function importPortalCapture(
   const runId = crypto.randomUUID();
   const qualifiedRows = importedRows.filter((row) => Number(row.match_score) >= 75 && row.status !== "SKIPPED");
   const autoStaged = await autoStageJobs(importedRows.sort((a, b) => Number(b.match_score) - Number(a.match_score)), env, user, 75);
+  const completedAt = new Date().toISOString();
+  const alertsCreated = await createJobAlerts(env, user.id, runId, qualifiedRows, 75, completedAt);
   const report = {
     sourceUrl,
     portal,
@@ -1153,8 +1416,8 @@ async function importPortalCapture(
     topOpportunities: importedRows.sort((a, b) => Number(b.match_score) - Number(a.match_score)).slice(0, 10).map(rowToJob),
     highestPriority: selectHighestPriority(qualifiedRows, 3).map(rowToJob),
     autoStaged,
+    alertsCreated,
   };
-  const completedAt = new Date().toISOString();
   await env.DB.prepare(
     `INSERT INTO discovery_runs
      (id, user_id, search_id, mode, status, providers_json, discovered, imported,
@@ -1298,7 +1561,90 @@ async function prepareApplication(
   };
 }
 
-async function handleRoleSignalApi(request: Request, env: Env, url: URL) {
+function addHours(value: string, hours: number) {
+  return new Date(new Date(value).getTime() + hours * 60 * 60 * 1000).toISOString();
+}
+
+function discoveryBodyFromRow(row: Record<string, unknown>) {
+  return {
+    name: asString(row.name, "Backend roles / India + Remote"),
+    keywords: parseJson(row.keywords_json, ["Backend Engineer", "Software Engineer", "Platform Engineer", "Node.js"]),
+    locations: parseJson(row.locations_json, ["India", "Remote", "APAC"]),
+    workModes: parseJson(row.work_modes_json, ["Remote", "Hybrid"]),
+    portals: parseJson(row.portals_json, ["Jobicy", "Arbeitnow", "Connected ATS boards"]),
+    minScore: Number(row.min_score ?? 75),
+    mode: "SCHEDULED",
+    force: true,
+  };
+}
+
+async function runAutomationForUser(
+  env: Env,
+  user: { id: string; email: string; name: string },
+  now: string,
+) {
+  const settings = await env.DB.prepare("SELECT * FROM automation_settings WHERE user_id = ?").bind(user.id).first<Record<string, unknown>>();
+  const cadenceHours = Math.max(6, Math.min(168, Number(settings?.cadence_hours ?? 24)));
+  const search = await env.DB.prepare(
+    "SELECT * FROM discovery_searches WHERE user_id = ? AND active = 1 ORDER BY updated_at DESC LIMIT 1",
+  ).bind(user.id).first<Record<string, unknown>>();
+  if (!search) throw new Error("Run and save a discovery search before starting scheduled automation.");
+  try {
+    const minScore = Math.max(75, Math.min(95, Number(settings?.min_score ?? search.min_score ?? 82)));
+    const run = await runDiscovery({ ...discoveryBodyFromRow(search), minScore }, env, user, now);
+    const completedAt = asString(run.completedAt, new Date().toISOString());
+    await env.DB.prepare(
+      `INSERT INTO automation_settings
+       (user_id, enabled, cadence_hours, min_score, browser_alerts, last_run_at, next_run_at, last_status, last_error, updated_at)
+       VALUES (?, 1, ?, ?, 1, ?, ?, 'COMPLETED', NULL, ?)
+       ON CONFLICT(user_id) DO UPDATE SET
+         last_run_at = excluded.last_run_at,
+         next_run_at = excluded.next_run_at,
+         last_status = excluded.last_status,
+         last_error = NULL,
+         updated_at = excluded.updated_at`,
+    ).bind(user.id, cadenceHours, minScore, completedAt, addHours(completedAt, cadenceHours), completedAt).run();
+    return run;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Scheduled discovery failed.";
+    await env.DB.prepare(
+      `UPDATE automation_settings SET last_status = 'FAILED', last_error = ?, next_run_at = ?, updated_at = ? WHERE user_id = ?`,
+    ).bind(message.slice(0, 500), addHours(now, cadenceHours), now, user.id).run();
+    throw error;
+  }
+}
+
+async function executeDueAutomations(env: Env, now: string, onlyUserId?: string) {
+  const result = onlyUserId
+    ? await env.DB.prepare(
+      `SELECT a.*, u.email, u.display_name FROM automation_settings a
+       JOIN users u ON u.user_id = a.user_id
+       WHERE a.enabled = 1 AND a.next_run_at <= ? AND a.user_id = ? LIMIT 1`,
+    ).bind(now, onlyUserId).all<Record<string, unknown>>()
+    : await env.DB.prepare(
+      `SELECT a.*, u.email, u.display_name FROM automation_settings a
+       JOIN users u ON u.user_id = a.user_id
+       WHERE a.enabled = 1 AND a.next_run_at <= ? ORDER BY a.next_run_at LIMIT 20`,
+    ).bind(now).all<Record<string, unknown>>();
+  const outcomes: Array<{ userId: string; status: string; message?: string }> = [];
+  for (const row of result.results) {
+    const user = { id: asString(row.user_id), email: asString(row.email), name: asString(row.display_name, "RoleSignal user") };
+    const cadenceHours = Math.max(6, Math.min(168, Number(row.cadence_hours ?? 24)));
+    const claim = await env.DB.prepare(
+      "UPDATE automation_settings SET next_run_at = ?, last_status = 'RUNNING', updated_at = ? WHERE user_id = ? AND enabled = 1 AND next_run_at <= ?",
+    ).bind(addHours(now, cadenceHours), now, user.id, now).run();
+    if (Number(claim.meta?.changes ?? 0) === 0) continue;
+    try {
+      await runAutomationForUser(env, user, now);
+      outcomes.push({ userId: user.id, status: "COMPLETED" });
+    } catch (error) {
+      outcomes.push({ userId: user.id, status: "FAILED", message: error instanceof Error ? error.message : "Scheduled discovery failed." });
+    }
+  }
+  return outcomes;
+}
+
+async function handleRoleSignalApi(request: Request, env: Env, url: URL, ctx: ExecutionContext) {
   try {
     await ensureSchema(env);
     const user = currentUser(request);
@@ -1311,7 +1657,8 @@ async function handleRoleSignalApi(request: Request, env: Env, url: URL) {
     ).bind(user.id, user.email, user.name, now).run();
 
     if (url.pathname === "/api/rolesignal/workspace" && request.method === "GET") {
-      const [resumes, preferences, profile, matches, sources, packets, vault, runs, discoverySearches, discoveryRuns] = await Promise.all([
+      ctx.waitUntil(executeDueAutomations(env, now, user.id));
+      const [resumes, preferences, profile, matches, sources, packets, vault, runs, discoverySearches, discoveryRuns, automation, alerts] = await Promise.all([
         env.DB.prepare(
           `SELECT id, filename, content_type, size_bytes, status, created_at
            FROM resumes WHERE user_id = ? ORDER BY created_at DESC LIMIT 10`,
@@ -1341,6 +1688,10 @@ async function handleRoleSignalApi(request: Request, env: Env, url: URL) {
         env.DB.prepare(
           "SELECT * FROM discovery_runs WHERE user_id = ? ORDER BY completed_at DESC, started_at DESC LIMIT 30",
         ).bind(user.id).all(),
+        env.DB.prepare("SELECT * FROM automation_settings WHERE user_id = ?").bind(user.id).first<Record<string, unknown>>(),
+        env.DB.prepare(
+          "SELECT * FROM job_alerts WHERE user_id = ? ORDER BY created_at DESC LIMIT 50",
+        ).bind(user.id).all(),
       ]);
       return json({
         user,
@@ -1354,6 +1705,8 @@ async function handleRoleSignalApi(request: Request, env: Env, url: URL) {
         searchRuns: (runs.results as Record<string, unknown>[]).map(rowToRun),
         discoverySearches: (discoverySearches.results as Record<string, unknown>[]).map(rowToDiscoverySearch),
         discoveryRuns: (discoveryRuns.results as Record<string, unknown>[]).map(rowToDiscoveryRun),
+        automation: rowToAutomation(automation),
+        alerts: (alerts.results as Record<string, unknown>[]).map(rowToAlert),
       });
     }
 
@@ -1441,6 +1794,64 @@ async function handleRoleSignalApi(request: Request, env: Env, url: URL) {
       return json({ saved: true, matchThreshold: threshold, dailyLimit, autoApply });
     }
 
+    if (url.pathname === "/api/rolesignal/automation/settings" && request.method === "POST") {
+      const body = await request.json() as Record<string, unknown>;
+      const enabled = body.enabled === true;
+      const cadenceHours = Math.max(6, Math.min(168, Number(body.cadenceHours ?? 24)));
+      const minScore = Math.max(75, Math.min(95, Number(body.minScore ?? 82)));
+      const browserAlerts = body.browserAlerts !== false;
+      const existingSearch = await env.DB.prepare(
+        "SELECT id FROM discovery_searches WHERE user_id = ? AND active = 1 ORDER BY updated_at DESC LIMIT 1",
+      ).bind(user.id).first<Record<string, unknown>>();
+      if (!existingSearch) await upsertDiscoverySearch(env, user.id, discoveryConfig({ minScore }), now);
+      const nextRunAt = addHours(now, cadenceHours);
+      await env.DB.prepare(
+        `INSERT INTO automation_settings
+         (user_id, enabled, cadence_hours, min_score, browser_alerts, last_run_at, next_run_at, last_status, last_error, updated_at)
+         VALUES (?, ?, ?, ?, ?, NULL, ?, 'READY', NULL, ?)
+         ON CONFLICT(user_id) DO UPDATE SET
+           enabled = excluded.enabled,
+           cadence_hours = excluded.cadence_hours,
+           min_score = excluded.min_score,
+           browser_alerts = excluded.browser_alerts,
+           next_run_at = CASE
+             WHEN automation_settings.enabled = 1 AND excluded.enabled = 1 THEN automation_settings.next_run_at
+             ELSE excluded.next_run_at
+           END,
+           last_status = CASE WHEN excluded.enabled = 1 THEN 'READY' ELSE 'PAUSED' END,
+           last_error = NULL,
+           updated_at = excluded.updated_at`,
+      ).bind(user.id, enabled ? 1 : 0, cadenceHours, minScore, browserAlerts ? 1 : 0, nextRunAt, now).run();
+      const saved = await env.DB.prepare("SELECT * FROM automation_settings WHERE user_id = ?").bind(user.id).first<Record<string, unknown>>();
+      return json({ saved: true, automation: rowToAutomation(saved) });
+    }
+
+    if (url.pathname === "/api/rolesignal/automation/run-now" && request.method === "POST") {
+      const existing = await env.DB.prepare("SELECT * FROM automation_settings WHERE user_id = ?").bind(user.id).first<Record<string, unknown>>();
+      if (!existing) {
+        await env.DB.prepare(
+          `INSERT INTO automation_settings
+           (user_id, enabled, cadence_hours, min_score, browser_alerts, last_run_at, next_run_at, last_status, last_error, updated_at)
+           VALUES (?, 0, 24, 82, 1, NULL, ?, 'READY', NULL, ?)`,
+        ).bind(user.id, addHours(now, 24), now).run();
+      }
+      const run = await runAutomationForUser(env, user, now);
+      const automation = await env.DB.prepare("SELECT * FROM automation_settings WHERE user_id = ?").bind(user.id).first<Record<string, unknown>>();
+      return json({ run, automation: rowToAutomation(automation) }, 201);
+    }
+
+    if (url.pathname === "/api/rolesignal/alerts/read" && request.method === "POST") {
+      const body = await request.json() as Record<string, unknown>;
+      const alertId = asString(body.alertId);
+      if (alertId) {
+        await env.DB.prepare("UPDATE job_alerts SET status = 'READ', read_at = ? WHERE id = ? AND user_id = ?").bind(now, alertId, user.id).run();
+      } else {
+        await env.DB.prepare("UPDATE job_alerts SET status = 'READ', read_at = ? WHERE user_id = ? AND status = 'UNREAD'").bind(now, user.id).run();
+      }
+      const alerts = await env.DB.prepare("SELECT * FROM job_alerts WHERE user_id = ? ORDER BY created_at DESC LIMIT 50").bind(user.id).all<Record<string, unknown>>();
+      return json({ alerts: alerts.results.map(rowToAlert) });
+    }
+
     if (url.pathname === "/api/rolesignal/answers" && request.method === "POST") {
       const body = await request.json() as Record<string, unknown>;
       const values = typeof body.values === "object" && body.values ? body.values as Record<string, unknown> : {};
@@ -1471,6 +1882,13 @@ async function handleRoleSignalApi(request: Request, env: Env, url: URL) {
     if (url.pathname === "/api/rolesignal/jobs/import" && request.method === "POST") {
       const body = await request.json() as Record<string, unknown>;
       return json({ job: await importSingleJob(body, env, user, now) }, 201);
+    }
+
+    if (url.pathname === "/api/rolesignal/jobs/enrich" && request.method === "POST") {
+      const body = await request.json() as Record<string, unknown>;
+      const jobId = asString(body.jobId);
+      if (!jobId) return json({ error: "Job id is required." }, 400);
+      return json({ job: await enrichSavedJob(env, user, jobId, now) });
     }
 
     if (url.pathname === "/api/rolesignal/discovery/run" && request.method === "POST") {

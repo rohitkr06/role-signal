@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "RoleSignal Browser Companion",
-  "version": "0.4.0",
-  "description": "Captures visible job listings and stages verified application fields without submitting.",
+  "version": "0.5.0",
+  "description": "Captures visible cross-portal job listings and stages verified application fields without submitting.",
   "permissions": ["activeTab", "scripting", "storage", "clipboardWrite"],
   "action": {
     "default_title": "RoleSignal",
