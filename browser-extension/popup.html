@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>RoleSignal</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main>
+      <header><span class="mark"><i></i></span><div><strong>RoleSignal</strong><small>Approval-first browser fill</small></div></header>
+      <label>Application packet<textarea id="packet" rows="11" placeholder="Paste the packet copied from RoleSignal"></textarea></label>
+      <p id="job" class="job"></p>
+      <button id="stage">Stage supported fields</button>
+      <button id="open" class="quiet">Open application page</button>
+      <p id="status" role="status">Final submission is never automated.</p>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>

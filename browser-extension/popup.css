@@ -1,0 +1,15 @@
+:root { color-scheme: light; font-family: Inter, ui-sans-serif, system-ui, sans-serif; color: #18231d; background: #f4f7f5; }
+* { box-sizing: border-box; }
+body { width: 340px; margin: 0; }
+main { padding: 16px; }
+header { display: flex; align-items: center; gap: 9px; margin-bottom: 15px; }
+header strong,header small { display: block; } header strong { font-size: 14px; } header small { margin-top: 2px; color: #778179; font-size: 10px; }
+.mark { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 9px 9px 9px 3px; background: #17372b; }.mark i { width: 10px; height: 10px; border: 2px solid #8cdbb8; border-radius: 50%; }
+label { display: block; color: #5f6a63; font-size: 10px; font-weight: 700; }
+textarea { width: 100%; margin-top: 6px; resize: vertical; border: 1px solid #d9e1dc; border-radius: 9px; background: white; padding: 9px; font: 10px/1.45 ui-monospace, monospace; outline: 0; }
+textarea:focus { border-color: #4b9879; box-shadow: 0 0 0 3px rgba(27,123,87,.09); }
+button { width: 100%; border: 1px solid #115e43; border-radius: 8px; padding: 9px; margin-top: 8px; background: #115e43; color: white; font-size: 11px; font-weight: 750; cursor: pointer; }
+button.quiet { background: white; border-color: #d5ddd8; color: #334139; }
+.job { min-height: 14px; margin: 8px 0 0; color: #406153; font-size: 10px; }
+#status { margin: 10px 0 0; padding: 8px; border-radius: 7px; background: #eaf3ee; color: #35614e; font-size: 9px; line-height: 1.45; }
+#status.warn { background: #fff1e6; color: #835027; }
