@@ -23,13 +23,19 @@ test("server-renders the RoleSignal product shell", async () => {
   assert.doesNotMatch(html, /Your site is taking shape|react-loading-skeleton/);
 });
 
-test("keeps Phase 3 operations, safety, and persistence contracts in source", async () => {
-  const [worker, app, schema, extension] = await Promise.all([
+test("keeps Phase 4 discovery, operations, safety, and persistence contracts in source", async () => {
+  const [worker, app, schema, extension, popup] = await Promise.all([
     readFile(new URL("../worker/index.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/rolesignal-app.tsx", import.meta.url), "utf8"),
     readFile(new URL("../db/schema.ts", import.meta.url), "utf8"),
     readFile(new URL("../browser-extension/content.js", import.meta.url), "utf8"),
+    readFile(new URL("../browser-extension/popup.js", import.meta.url), "utf8"),
   ]);
+  assert.match(worker, /\/api\/rolesignal\/discovery\/run/);
+  assert.match(worker, /\/api\/rolesignal\/discovery\/capture/);
+  assert.match(worker, /\/api\/rolesignal\/export\/discovery-run\.md/);
+  assert.match(worker, /api\/v2\/remote-jobs/);
+  assert.match(worker, /api\/job-board-api/);
   assert.match(worker, /\/api\/rolesignal\/sources\/scan/);
   assert.match(worker, /\/api\/rolesignal\/sources\/scan-all/);
   assert.match(worker, /\/api\/rolesignal\/sources\/remove/);
@@ -44,12 +50,20 @@ test("keeps Phase 3 operations, safety, and persistence contracts in source", as
   assert.match(schema, /answerVault/);
   assert.match(schema, /searchRuns/);
   assert.match(schema, /applicationKits/);
+  assert.match(schema, /discoverySearches/);
+  assert.match(schema, /discoveryRuns/);
   assert.match(schema, /idx_job_matches_user_fingerprint/);
   assert.match(app, /extractText\(new Uint8Array/);
   assert.match(app, /extractRawText/);
   assert.match(app, /Verified answer vault/);
   assert.match(app, /One run\. Every connected source/);
+  assert.match(app, /Market-wide discovery/);
+  assert.match(app, /Search beyond one company/);
   assert.match(extension, /work_authorization/);
+  assert.match(extension, /ROLE_SIGNAL_CAPTURE/);
+  assert.match(extension, /captureVisibleJobs/);
   assert.match(extension, /neverSubmit/);
+  assert.match(popup, /ROLE_SIGNAL_CAPTURE/);
   assert.doesNotMatch(extension, /\.click\(\)|requestSubmit|\.submit\(/);
+  assert.doesNotMatch(popup, /requestSubmit|\.submit\(/);
 });

@@ -8,12 +8,22 @@
   </head>
   <body>
     <main>
-      <header><span class="mark"><i></i></span><div><strong>RoleSignal</strong><small>Approval-first browser fill</small></div></header>
-      <label>Application packet<textarea id="packet" rows="11" placeholder="Paste the packet copied from RoleSignal"></textarea></label>
-      <p id="job" class="job"></p>
-      <button id="stage">Stage supported fields</button>
-      <button id="open" class="quiet">Open application page</button>
-      <p id="status" role="status">Verified answer-vault fields can be staged. Final submission is never automated.</p>
+      <header><span class="mark"><i></i></span><div><strong>RoleSignal</strong><small>Discovery + approval-first browser fill</small></div></header>
+      <nav class="tabs"><button class="active" data-panel="discover">Discover</button><button data-panel="apply">Apply</button></nav>
+      <section id="discover" class="panel active">
+        <div class="intro"><strong>Capture visible jobs</strong><span>Use this on a LinkedIn, Naukri, Workday, Indeed, or company search-results page.</span></div>
+        <button id="capture">Capture visible jobs</button>
+        <label>Captured batch<textarea id="captured" rows="8" readonly placeholder="Captured jobs will appear here and be copied automatically."></textarea></label>
+        <button id="copy-capture" class="quiet">Copy discovery batch</button>
+        <a class="open-rolesignal" href="https://rolesignal-rohit.rohitk61299.chatgpt.site" target="_blank">Open RoleSignal Discovery</a>
+      </section>
+      <section id="apply" class="panel">
+        <label>Application packet<textarea id="packet" rows="9" placeholder="Paste the packet copied from RoleSignal"></textarea></label>
+        <p id="job" class="job"></p>
+        <button id="stage">Stage supported fields</button>
+        <button id="open" class="quiet">Open application page</button>
+      </section>
+      <p id="status" role="status">Capture reads only visible job cards. Final submission is never automated.</p>
     </main>
     <script src="popup.js"></script>
   </body>

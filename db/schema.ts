@@ -174,3 +174,40 @@ export const applicationKits = sqliteTable("application_kits", {
   uniqueIndex("idx_application_kits_user_job").on(table.userId, table.jobId),
   index("idx_application_kits_packet").on(table.packetId),
 ]);
+
+export const discoverySearches = sqliteTable("discovery_searches", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull(),
+  name: text("name").notNull(),
+  keywordsJson: text("keywords_json").notNull(),
+  locationsJson: text("locations_json").notNull(),
+  workModesJson: text("work_modes_json").notNull(),
+  portalsJson: text("portals_json").notNull(),
+  minScore: integer("min_score").notNull(),
+  active: integer("active", { mode: "boolean" }).notNull(),
+  lastRunAt: text("last_run_at"),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+}, (table) => [
+  uniqueIndex("idx_discovery_searches_user_name").on(table.userId, table.name),
+  index("idx_discovery_searches_user_updated").on(table.userId, table.updatedAt),
+]);
+
+export const discoveryRuns = sqliteTable("discovery_runs", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull(),
+  searchId: text("search_id"),
+  mode: text("mode").notNull(),
+  status: text("status").notNull(),
+  providersJson: text("providers_json").notNull(),
+  discovered: integer("discovered").notNull(),
+  imported: integer("imported").notNull(),
+  duplicates: integer("duplicates").notNull(),
+  qualified: integer("qualified").notNull(),
+  reportJson: text("report_json").notNull(),
+  startedAt: text("started_at").notNull(),
+  completedAt: text("completed_at"),
+}, (table) => [
+  index("idx_discovery_runs_user_completed").on(table.userId, table.completedAt),
+  index("idx_discovery_runs_search").on(table.searchId),
+]);

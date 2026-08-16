@@ -1,10 +1,105 @@
 if (!globalThis.__roleSignalCompanionLoaded) {
   globalThis.__roleSignalCompanionLoaded = true;
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-    if (message?.type !== "ROLE_SIGNAL_STAGE") return;
-    try { sendResponse(stagePacket(message.packet)); }
-    catch (error) { sendResponse({ error: error instanceof Error ? error.message : "Fill failed", filled: 0, unknownRequired: [] }); }
+    if (message?.type === "ROLE_SIGNAL_STAGE") {
+      try { sendResponse(stagePacket(message.packet)); }
+      catch (error) { sendResponse({ error: error instanceof Error ? error.message : "Fill failed", filled: 0, unknownRequired: [] }); }
+    }
+    if (message?.type === "ROLE_SIGNAL_CAPTURE") {
+      try { sendResponse(captureVisibleJobs()); }
+      catch (error) { sendResponse({ error: error instanceof Error ? error.message : "Capture failed", jobs: [] }); }
+    }
   });
+}
+
+function captureVisibleJobs() {
+  const portal = portalName();
+  const selectors = portal === "LinkedIn"
+    ? [".jobs-search-results__list-item", ".job-card-container", "[data-occludable-job-id]"]
+    : portal === "Naukri"
+      ? [".srp-jobtuple-wrapper", ".jobTuple", "article.jobTuple"]
+      : portal === "Workday"
+        ? ["[data-automation-id='jobTitle']", "[data-automation-id='jobSearchResult']", "li"]
+        : portal === "Indeed"
+          ? [".job_seen_beacon", ".result", "li.css-5lfssm"]
+          : ["article", "li", "[class*='job-card']", "[class*='jobCard']"];
+  const cards = [...new Set(selectors.flatMap((selector) => [...document.querySelectorAll(selector)]))];
+  const jobs = [];
+  const seen = new Set();
+  for (const card of cards) {
+    const anchor = bestJobAnchor(card);
+    if (!anchor?.href) continue;
+    const applicationUrl = cleanJobUrl(anchor.href);
+    if (!applicationUrl || seen.has(applicationUrl)) continue;
+    const role = textFrom(card, ["[data-automation-id='jobTitle']", ".job-card-list__title", ".title", ".jobTitle", "h2", "h3", "a[aria-label]"]) || cleanText(anchor.textContent);
+    if (!role || role.length < 3 || role.length > 180) continue;
+    const company = textFrom(card, ["[data-automation-id='company']", ".artdeco-entity-lockup__subtitle", ".comp-name", ".companyName", "[class*='company']"]);
+    const location = textFrom(card, ["[data-automation-id='locations']", ".job-card-container__metadata-item", ".locWdth", ".companyLocation", "[class*='location']"]);
+    const postedDate = textFrom(card, ["time", "[data-automation-id='postedOn']", ".job-post-day", ".date"]);
+    const cardText = cleanText(card.textContent).slice(0, 6000);
+    jobs.push({
+      externalId: card.getAttribute("data-job-id") || card.getAttribute("data-occludable-job-id") || "",
+      role,
+      company: company || hostCompany(applicationUrl),
+      location: location || "Not specified",
+      postedDate,
+      applicationUrl,
+      description: cardText,
+    });
+    seen.add(applicationUrl);
+    if (jobs.length >= 100) break;
+  }
+  return {
+    captureVersion: 1,
+    portal,
+    sourceUrl: location.href,
+    capturedAt: new Date().toISOString(),
+    jobs,
+  };
+}
+
+function portalName() {
+  const host = location.hostname.toLowerCase();
+  if (host.includes("linkedin")) return "LinkedIn";
+  if (host.includes("naukri")) return "Naukri";
+  if (host.includes("myworkdayjobs") || host.includes("workday")) return "Workday";
+  if (host.includes("indeed")) return "Indeed";
+  return "Browser capture";
+}
+
+function bestJobAnchor(card) {
+  const anchors = [...card.querySelectorAll("a[href]")];
+  return anchors.find((anchor) => /\/jobs?\/|jobview|jobposting|position|career|myworkdayjobs/i.test(anchor.href)) || anchors[0] || (card.matches("a[href]") ? card : null);
+}
+
+function cleanJobUrl(value) {
+  try {
+    const url = new URL(value, location.href);
+    if (url.protocol !== "https:") return "";
+    for (const key of [...url.searchParams.keys()]) {
+      if (/^(trk|tracking|ref|refid|utm_|currentjobid)/i.test(key)) url.searchParams.delete(key);
+    }
+    url.hash = "";
+    return url.toString();
+  } catch { return ""; }
+}
+
+function textFrom(card, selectors) {
+  for (const selector of selectors) {
+    const element = card.matches?.(selector) ? card : card.querySelector(selector);
+    const value = cleanText(element?.textContent || element?.getAttribute?.("aria-label"));
+    if (value) return value.slice(0, 240);
+  }
+  return "";
+}
+
+function cleanText(value = "") {
+  return value.replace(/\s+/g, " ").trim();
+}
+
+function hostCompany(urlValue) {
+  try { return new URL(urlValue).hostname.replace(/^www\./, "").split(".")[0].replace(/[-_]/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase()); }
+  catch { return "Unknown company"; }
 }
 
 function stagePacket(packet) {

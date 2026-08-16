@@ -1,11 +1,23 @@
 const packetInput = document.querySelector("#packet");
 const status = document.querySelector("#status");
 const job = document.querySelector("#job");
+const capturedInput = document.querySelector("#captured");
 
-chrome.storage.local.get("rolesignalPacket").then(({ rolesignalPacket }) => {
-  if (!rolesignalPacket) return;
-  packetInput.value = JSON.stringify(rolesignalPacket, null, 2);
-  showJob(rolesignalPacket);
+document.querySelectorAll(".tabs button").forEach((button) => button.addEventListener("click", () => {
+  document.querySelectorAll(".tabs button").forEach((item) => item.classList.toggle("active", item === button));
+  document.querySelectorAll(".panel").forEach((panel) => panel.classList.toggle("active", panel.id === button.dataset.panel));
+  status.className = "";
+  status.textContent = button.dataset.panel === "discover"
+    ? "Capture reads only visible job cards. Final submission is never automated."
+    : "Verified answer-vault fields can be staged. Final submission is never automated.";
+}));
+
+chrome.storage.local.get(["rolesignalPacket", "rolesignalCapture"]).then(({ rolesignalPacket, rolesignalCapture }) => {
+  if (rolesignalPacket) {
+    packetInput.value = JSON.stringify(rolesignalPacket, null, 2);
+    showJob(rolesignalPacket);
+  }
+  if (rolesignalCapture) capturedInput.value = JSON.stringify(rolesignalCapture, null, 2);
 });
 
 packetInput.addEventListener("input", () => {
@@ -40,6 +52,38 @@ document.querySelector("#open").addEventListener("click", async () => {
   } catch (error) {
     status.className = "warn";
     status.textContent = error instanceof Error ? error.message : "The application URL is unavailable.";
+  }
+});
+
+document.querySelector("#capture").addEventListener("click", async () => {
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab?.id) throw new Error("Open a job-search results page first.");
+    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["content.js"] });
+    const batch = await chrome.tabs.sendMessage(tab.id, { type: "ROLE_SIGNAL_CAPTURE" });
+    if (batch?.error) throw new Error(batch.error);
+    if (!batch?.jobs?.length) throw new Error("No visible job cards were found. Scroll the results into view and try again.");
+    const text = JSON.stringify(batch, null, 2);
+    capturedInput.value = text;
+    await chrome.storage.local.set({ rolesignalCapture: batch });
+    await navigator.clipboard.writeText(text);
+    status.className = "";
+    status.textContent = `Captured ${batch.jobs.length} visible ${batch.portal} jobs and copied the discovery batch.`;
+  } catch (error) {
+    status.className = "warn";
+    status.textContent = error instanceof Error ? error.message : "Visible jobs could not be captured.";
+  }
+});
+
+document.querySelector("#copy-capture").addEventListener("click", async () => {
+  try {
+    if (!capturedInput.value) throw new Error("Capture a results page first.");
+    await navigator.clipboard.writeText(capturedInput.value);
+    status.className = "";
+    status.textContent = "Discovery batch copied. Paste it into RoleSignal Discovery.";
+  } catch (error) {
+    status.className = "warn";
+    status.textContent = error instanceof Error ? error.message : "The discovery batch could not be copied.";
   }
 });
 

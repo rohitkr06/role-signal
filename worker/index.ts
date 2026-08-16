@@ -201,6 +201,35 @@ const schemaStatements = [
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   )`,
+  `CREATE TABLE IF NOT EXISTS discovery_searches (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    keywords_json TEXT NOT NULL,
+    locations_json TEXT NOT NULL,
+    work_modes_json TEXT NOT NULL,
+    portals_json TEXT NOT NULL,
+    min_score INTEGER NOT NULL,
+    active INTEGER NOT NULL,
+    last_run_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS discovery_runs (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    search_id TEXT,
+    mode TEXT NOT NULL,
+    status TEXT NOT NULL,
+    providers_json TEXT NOT NULL,
+    discovered INTEGER NOT NULL,
+    imported INTEGER NOT NULL,
+    duplicates INTEGER NOT NULL,
+    qualified INTEGER NOT NULL,
+    report_json TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    completed_at TEXT
+  )`,
   `CREATE INDEX IF NOT EXISTS idx_resumes_user_id ON resumes(user_id)`,
   `CREATE INDEX IF NOT EXISTS idx_jobs_match_score ON jobs(match_score DESC)`,
   `CREATE INDEX IF NOT EXISTS idx_applications_user_status ON applications(user_id, status)`,
@@ -215,6 +244,10 @@ const schemaStatements = [
   `CREATE INDEX IF NOT EXISTS idx_search_runs_user_completed ON search_runs(user_id, completed_at DESC)`,
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_application_kits_user_job ON application_kits(user_id, job_id)`,
   `CREATE INDEX IF NOT EXISTS idx_application_kits_packet ON application_kits(packet_id)`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_discovery_searches_user_name ON discovery_searches(user_id, name)`,
+  `CREATE INDEX IF NOT EXISTS idx_discovery_searches_user_updated ON discovery_searches(user_id, updated_at DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_discovery_runs_user_completed ON discovery_runs(user_id, completed_at DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_discovery_runs_search ON discovery_runs(search_id)`,
 ] as const;
 
 async function ensureSchema(env: Env) {
@@ -313,6 +346,39 @@ function rowToRun(row: Record<string, unknown>) {
     ready: row.ready,
     needsInput: row.needs_input,
     skipped: row.skipped,
+    report: parseJson(row.report_json, {}),
+    startedAt: row.started_at,
+    completedAt: row.completed_at,
+  };
+}
+
+function rowToDiscoverySearch(row: Record<string, unknown>) {
+  return {
+    id: row.id,
+    name: row.name,
+    keywords: parseJson(row.keywords_json, []),
+    locations: parseJson(row.locations_json, []),
+    workModes: parseJson(row.work_modes_json, []),
+    portals: parseJson(row.portals_json, []),
+    minScore: row.min_score,
+    active: Boolean(row.active),
+    lastRunAt: row.last_run_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function rowToDiscoveryRun(row: Record<string, unknown>) {
+  return {
+    id: row.id,
+    searchId: row.search_id,
+    mode: row.mode,
+    status: row.status,
+    providers: parseJson(row.providers_json, []),
+    discovered: row.discovered,
+    imported: row.imported,
+    duplicates: row.duplicates,
+    qualified: row.qualified,
     report: parseJson(row.report_json, {}),
     startedAt: row.started_at,
     completedAt: row.completed_at,
@@ -424,10 +490,13 @@ async function profileForUser(env: Env, user: { id: string; email: string; name:
 
 async function saveScoredJob(env: Env, userId: string, scored: ScoredJob, sourceId: string | null, now: string) {
   const existing = await env.DB.prepare(
-    "SELECT id, platform, application_url FROM job_matches WHERE user_id = ? AND fingerprint = ?",
+    "SELECT * FROM job_matches WHERE user_id = ? AND fingerprint = ?",
   ).bind(userId, scored.fingerprint).first<Record<string, unknown>>();
   const id = asString(existing?.id) || crypto.randomUUID();
   const officialPlatforms = new Set(["Company site", "Greenhouse", "Lever", "Ashby"]);
+  if (existing && officialPlatforms.has(asString(existing.platform)) && !officialPlatforms.has(scored.platform ?? "")) {
+    return { id, duplicate: true, applicationUrl: asString(existing.application_url), preserved: true };
+  }
   const shouldPreferNewUrl = !existing || officialPlatforms.has(scored.platform ?? "");
   const applicationUrl = shouldPreferNewUrl ? scored.applicationUrl : asString(existing.application_url, scored.applicationUrl);
   await env.DB.prepare(
@@ -455,7 +524,7 @@ async function saveScoredJob(env: Env, userId: string, scored: ScoredJob, source
     scored.postedDate ?? null, scored.description, scored.compensation ?? null, scored.score,
     scored.classification, scored.status, JSON.stringify({ ...scored, applicationUrl }), now, now,
   ).run();
-  return { id, duplicate: Boolean(existing), applicationUrl };
+  return { id, duplicate: Boolean(existing), applicationUrl, preserved: false };
 }
 
 function isPrivateHostname(hostname: string) {
@@ -478,7 +547,7 @@ async function safeFetch(urlValue: string, accept = "text/html,application/json"
   const timer = setTimeout(() => controller.abort(), 12_000);
   try {
     const response = await fetch(target, {
-      headers: { accept, "user-agent": "RoleSignal/3.0 job-matching assistant" },
+      headers: { accept, "user-agent": "RoleSignal/4.0 job-discovery assistant" },
       redirect: "follow",
       signal: controller.signal,
     });
@@ -757,6 +826,352 @@ async function scanAllSources(
   };
 }
 
+type DiscoveryConfig = {
+  name: string;
+  keywords: string[];
+  locations: string[];
+  workModes: string[];
+  portals: string[];
+  minScore: number;
+};
+
+type JobicyJob = {
+  id?: number | string;
+  url?: string;
+  jobTitle?: string;
+  companyName?: string;
+  jobIndustry?: string[] | string;
+  jobType?: string[] | string;
+  jobGeo?: string;
+  jobLevel?: string;
+  jobExcerpt?: string;
+  jobDescription?: string;
+  pubDate?: string;
+  salaryMin?: number;
+  salaryMax?: number;
+  salaryCurrency?: string;
+  salaryPeriod?: string;
+};
+
+type ArbeitnowJob = {
+  slug?: string;
+  company_name?: string;
+  title?: string;
+  description?: string;
+  remote?: boolean;
+  url?: string;
+  tags?: string[];
+  job_types?: string[];
+  location?: string;
+  created_at?: number;
+};
+
+function stringList(value: unknown, fallback: string[]) {
+  const source = Array.isArray(value) ? value : typeof value === "string" ? value.split(",") : fallback;
+  return [...new Set(source.map((item) => asString(item).slice(0, 80)).filter(Boolean))].slice(0, 12);
+}
+
+function discoveryConfig(body: Record<string, unknown>): DiscoveryConfig {
+  return {
+    name: asString(body.name, "Backend roles / India + Remote").slice(0, 80),
+    keywords: stringList(body.keywords, ["Backend Engineer", "Software Engineer", "Platform Engineer", "Node.js"]),
+    locations: stringList(body.locations, ["India", "Remote", "APAC"]),
+    workModes: stringList(body.workModes, ["Remote", "Hybrid"]),
+    portals: stringList(body.portals, ["Jobicy", "Arbeitnow", "Connected ATS boards"]),
+    minScore: Math.max(65, Math.min(95, Number(body.minScore ?? 75))),
+  };
+}
+
+function isDiscoveryCandidate(job: JobInput, config: DiscoveryConfig) {
+  const role = job.role.toLowerCase();
+  const description = job.description.toLowerCase();
+  const targetTerms = config.keywords.flatMap((keyword) => {
+    const normalized = keyword.toLowerCase().trim();
+    const tokens = normalized.split(/[^a-z0-9+#.]+/).filter((token) => token.length >= 3 && !new Set(["engineer", "engineering", "software", "developer"]).has(token));
+    return [normalized, ...tokens];
+  });
+  const roleRelevant = targetTerms.some((term) => role.includes(term)) || /backend|back-end|platform engineer|api engineer|infrastructure engineer|distributed systems|node\.js|nodejs/.test(role);
+  if (!roleRelevant) return false;
+  const mode = (job.workMode || inferWorkMode(job.location, description)).toLowerCase();
+  const location = job.location.toLowerCase();
+  const locationRelevant = config.locations.some((wanted) => {
+    const value = wanted.toLowerCase();
+    if (value === "remote") return mode === "remote" || /worldwide|anywhere/.test(location);
+    if (value === "apac") return /apac|asia|india|singapore|australia|remote|worldwide|anywhere/.test(location);
+    return location.includes(value);
+  });
+  return locationRelevant || (config.workModes.some((value) => value.toLowerCase() === "remote") && mode === "remote");
+}
+
+function compensationFromJobicy(job: JobicyJob) {
+  if (job.salaryMin == null && job.salaryMax == null) return "";
+  const range = [job.salaryMin, job.salaryMax].filter((value) => value != null).join("-");
+  return [job.salaryCurrency, range, job.salaryPeriod].filter(Boolean).join(" ");
+}
+
+async function upsertDiscoverySearch(env: Env, userId: string, config: DiscoveryConfig, now: string) {
+  const generatedId = crypto.randomUUID();
+  await env.DB.prepare(
+    `INSERT INTO discovery_searches
+     (id, user_id, name, keywords_json, locations_json, work_modes_json, portals_json,
+      min_score, active, last_run_at, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, NULL, ?, ?)
+     ON CONFLICT(user_id, name) DO UPDATE SET
+       keywords_json = excluded.keywords_json,
+       locations_json = excluded.locations_json,
+       work_modes_json = excluded.work_modes_json,
+       portals_json = excluded.portals_json,
+       min_score = excluded.min_score,
+       active = 1,
+       updated_at = excluded.updated_at`,
+  ).bind(
+    generatedId, userId, config.name, JSON.stringify(config.keywords), JSON.stringify(config.locations),
+    JSON.stringify(config.workModes), JSON.stringify(config.portals), config.minScore, now, now,
+  ).run();
+  return env.DB.prepare(
+    "SELECT * FROM discovery_searches WHERE user_id = ? AND name = ?",
+  ).bind(userId, config.name).first<Record<string, unknown>>();
+}
+
+async function autoStageJobs(
+  rows: Array<Record<string, unknown>>,
+  env: Env,
+  user: { id: string; email: string; name: string },
+  threshold: number,
+) {
+  const preferences = await env.DB.prepare(
+    "SELECT auto_apply, daily_limit, match_threshold FROM preferences WHERE user_id = ?",
+  ).bind(user.id).first<Record<string, unknown>>();
+  if (Number(preferences?.auto_apply ?? 0) !== 1) return [];
+  const effectiveThreshold = Math.max(75, threshold, Number(preferences?.match_threshold ?? 75));
+  const limit = Math.max(1, Math.min(20, Number(preferences?.daily_limit ?? 5)));
+  const staged: Array<{ packetId: string; jobId: string; status: string }> = [];
+  for (const row of rows.filter((job) => Number(job.match_score) >= effectiveThreshold && job.status !== "SKIPPED").slice(0, limit)) {
+    try {
+      const packet = await prepareApplication({ jobId: row.id }, env, user, new Date().toISOString());
+      staged.push({ packetId: asString(packet.id), jobId: asString(row.id), status: asString(packet.status) });
+    } catch {
+      // A single application packet must never abort the discovery run.
+    }
+  }
+  return staged;
+}
+
+async function runDiscovery(
+  body: Record<string, unknown>,
+  env: Env,
+  user: { id: string; email: string; name: string },
+  startedAt: string,
+) {
+  const config = discoveryConfig(body);
+  const searchRow = await upsertDiscoverySearch(env, user.id, config, startedAt);
+  const searchId = asString(searchRow?.id);
+  const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+  const recent = await env.DB.prepare(
+    "SELECT * FROM discovery_runs WHERE user_id = ? AND search_id = ? AND mode = 'PUBLIC_FEEDS' AND completed_at >= ? ORDER BY completed_at DESC LIMIT 1",
+  ).bind(user.id, searchId, oneHourAgo).first<Record<string, unknown>>();
+  if (recent) return { ...rowToDiscoveryRun(recent), cached: true };
+
+  const runId = crypto.randomUUID();
+  await env.DB.prepare(
+    `INSERT INTO discovery_runs
+     (id, user_id, search_id, mode, status, providers_json, discovered, imported,
+      duplicates, qualified, report_json, started_at, completed_at)
+     VALUES (?, ?, ?, 'PUBLIC_FEEDS', 'RUNNING', '[]', 0, 0, 0, 0, '{}', ?, NULL)`,
+  ).bind(runId, user.id, searchId, startedAt).run();
+
+  const keyword = config.keywords[0]?.replace(/\b(engineer|engineering|developer)\b/gi, "").trim() || "backend";
+  const jobicyUrl = new URL("https://jobicy.com/api/v2/remote-jobs");
+  jobicyUrl.searchParams.set("count", "100");
+  jobicyUrl.searchParams.set("geo", "apac");
+  jobicyUrl.searchParams.set("industry", "engineering");
+  jobicyUrl.searchParams.set("tag", keyword);
+
+  const providerReports: Array<{ provider: string; discovered: number; relevant: number; imported: number; duplicates: number }> = [];
+  const failures: Array<{ provider: string; message: string }> = [];
+  const candidates: JobInput[] = [];
+  const feedResults = await Promise.allSettled([
+    safeFetch(jobicyUrl.toString(), "application/json").then((response) => response.json() as Promise<{ jobs?: JobicyJob[] }>),
+    safeFetch("https://www.arbeitnow.com/api/job-board-api?page=1", "application/json").then((response) => response.json() as Promise<{ data?: ArbeitnowJob[] }>),
+  ]);
+
+  if (feedResults[0].status === "fulfilled") {
+    const jobs = feedResults[0].value.jobs ?? [];
+    const mapped = jobs.map((job): JobInput => ({
+      externalId: String(job.id ?? job.url ?? ""),
+      company: asString(job.companyName, "Unknown company"),
+      role: asString(job.jobTitle, "Untitled role"),
+      location: asString(job.jobGeo, "Remote"),
+      workMode: "Remote",
+      platform: "Jobicy",
+      applicationUrl: asString(job.url),
+      postedDate: asString(job.pubDate),
+      description: stripHtml(asString(job.jobDescription, asString(job.jobExcerpt))),
+      compensation: compensationFromJobicy(job),
+    })).filter((job) => job.applicationUrl && isDiscoveryCandidate(job, config));
+    candidates.push(...mapped);
+    providerReports.push({ provider: "Jobicy", discovered: jobs.length, relevant: mapped.length, imported: 0, duplicates: 0 });
+  } else {
+    failures.push({ provider: "Jobicy", message: feedResults[0].reason instanceof Error ? feedResults[0].reason.message : "Feed unavailable" });
+  }
+
+  if (feedResults[1].status === "fulfilled") {
+    const jobs = feedResults[1].value.data ?? [];
+    const mapped = jobs.map((job): JobInput => ({
+      externalId: asString(job.slug, asString(job.url)),
+      company: asString(job.company_name, "Unknown company"),
+      role: asString(job.title, "Untitled role"),
+      location: asString(job.location, job.remote ? "Remote" : "Not specified"),
+      workMode: job.remote ? "Remote" : inferWorkMode(asString(job.location), asString(job.description)),
+      platform: "Arbeitnow",
+      applicationUrl: asString(job.url),
+      postedDate: job.created_at ? new Date(job.created_at * 1000).toISOString() : "",
+      description: stripHtml(asString(job.description)),
+    })).filter((job) => job.applicationUrl && isDiscoveryCandidate(job, config));
+    candidates.push(...mapped);
+    providerReports.push({ provider: "Arbeitnow", discovered: jobs.length, relevant: mapped.length, imported: 0, duplicates: 0 });
+  } else {
+    failures.push({ provider: "Arbeitnow", message: feedResults[1].reason instanceof Error ? feedResults[1].reason.message : "Feed unavailable" });
+  }
+
+  const sourceResult = await env.DB.prepare(
+    "SELECT provider, source_token, label FROM job_sources WHERE user_id = ? AND active = 1 ORDER BY created_at",
+  ).bind(user.id).all<Record<string, unknown>>();
+  for (const source of sourceResult.results) {
+    try {
+      const report = await scanSource({ provider: source.provider, token: source.source_token, label: source.label }, env, user, new Date().toISOString());
+      providerReports.push({ provider: `${asString(source.label)} / ${asString(source.provider)}`, discovered: report.discovered, relevant: report.discovered, imported: report.unique, duplicates: report.duplicates });
+    } catch (error) {
+      failures.push({ provider: `${asString(source.label)} / ${asString(source.provider)}`, message: error instanceof Error ? error.message : "Board scan failed" });
+    }
+  }
+
+  const profile = await profileForUser(env, user);
+  let duplicates = providerReports.reduce((sum, report) => sum + report.duplicates, 0);
+  const runRows: Array<Record<string, unknown>> = [];
+  for (const candidate of candidates.slice(0, 180)) {
+    const scored = scoreJob(profile, candidate);
+    const savedAt = new Date().toISOString();
+    const saved = await saveScoredJob(env, user.id, scored, null, savedAt);
+    if (saved.duplicate) duplicates += 1;
+    const provider = providerReports.find((report) => report.provider === candidate.platform);
+    if (provider) {
+      provider.imported += saved.duplicate ? 0 : 1;
+      provider.duplicates += saved.duplicate ? 1 : 0;
+    }
+    if (saved.preserved) {
+      const preserved = await env.DB.prepare("SELECT * FROM job_matches WHERE id = ? AND user_id = ?").bind(saved.id, user.id).first<Record<string, unknown>>();
+      if (preserved) runRows.push(preserved);
+      continue;
+    }
+    runRows.push({
+      id: saved.id, user_id: user.id, source_id: null, fingerprint: scored.fingerprint,
+      company: scored.company, role: scored.role, location: scored.location,
+      work_mode: scored.workMode ?? "Not specified", platform: scored.platform ?? "Company site",
+      application_url: saved.applicationUrl, posted_date: scored.postedDate ?? null,
+      description: scored.description, compensation: scored.compensation ?? null,
+      match_score: scored.score, classification: scored.classification, status: scored.status,
+      score_json: JSON.stringify({ ...scored, applicationUrl: saved.applicationUrl }), updated_at: savedAt,
+    });
+  }
+
+  runRows.sort((a, b) => Number(b.match_score) - Number(a.match_score));
+  const qualified = runRows.filter((row) => Number(row.match_score) >= config.minScore && row.status !== "SKIPPED");
+  const autoStaged = await autoStageJobs(runRows, env, user, config.minScore);
+  const topRows = runRows.slice(0, 10);
+  const report = {
+    config,
+    providerReports,
+    failures,
+    topOpportunities: topRows.map(rowToJob),
+    highestPriority: selectHighestPriority(qualified, 3).map(rowToJob),
+    autoStaged,
+  };
+  const completedAt = new Date().toISOString();
+  const status = failures.length === providerReports.length + failures.length ? "FAILED" : failures.length ? "PARTIAL" : "COMPLETED";
+  const discovered = providerReports.reduce((sum, report) => sum + report.discovered, 0);
+  const imported = providerReports.reduce((sum, report) => sum + report.imported, 0);
+  await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE discovery_runs SET status = ?, providers_json = ?, discovered = ?, imported = ?,
+       duplicates = ?, qualified = ?, report_json = ?, completed_at = ? WHERE id = ? AND user_id = ?`,
+    ).bind(status, JSON.stringify(providerReports), discovered, imported, duplicates, qualified.length, JSON.stringify(report), completedAt, runId, user.id),
+    env.DB.prepare("UPDATE discovery_searches SET last_run_at = ?, updated_at = ? WHERE id = ? AND user_id = ?")
+      .bind(completedAt, completedAt, searchId, user.id),
+  ]);
+  return rowToDiscoveryRun({
+    id: runId, user_id: user.id, search_id: searchId, mode: "PUBLIC_FEEDS", status,
+    providers_json: JSON.stringify(providerReports), discovered, imported, duplicates,
+    qualified: qualified.length, report_json: JSON.stringify(report), started_at: startedAt, completed_at: completedAt,
+  });
+}
+
+async function importPortalCapture(
+  body: Record<string, unknown>,
+  env: Env,
+  user: { id: string; email: string; name: string },
+  startedAt: string,
+) {
+  const batch = typeof body.batch === "object" && body.batch ? body.batch as Record<string, unknown> : body;
+  const jobs = Array.isArray(batch.jobs) ? batch.jobs.slice(0, 100) as Array<Record<string, unknown>> : [];
+  if (!jobs.length) throw new Error("Paste a browser companion discovery batch containing at least one job.");
+  const sourceUrl = asString(batch.sourceUrl);
+  const portal = asString(batch.portal, "Portal capture").slice(0, 40);
+  const profile = await profileForUser(env, user);
+  const importedRows: Array<Record<string, unknown>> = [];
+  let duplicates = 0;
+  let rejected = 0;
+  for (const job of jobs) {
+    const applicationUrl = asString(job.applicationUrl || job.url);
+    let target: URL;
+    try { target = new URL(applicationUrl); } catch { rejected += 1; continue; }
+    if (target.protocol !== "https:" || isPrivateHostname(target.hostname)) { rejected += 1; continue; }
+    const role = asString(job.role || job.title).slice(0, 180);
+    if (!role) { rejected += 1; continue; }
+    const company = asString(job.company, companyFromUrl(applicationUrl)).slice(0, 120);
+    const location = asString(job.location, "Not specified").slice(0, 160);
+    const description = asString(job.description || job.cardText, `${role} at ${company}. Captured from a signed-in ${portal} search results page.`).slice(0, 20_000);
+    const input: JobInput = {
+      externalId: asString(job.externalId), company, role, location,
+      workMode: asString(job.workMode, inferWorkMode(location, description)),
+      platform: portal, applicationUrl, postedDate: asString(job.postedDate), description,
+      compensation: asString(job.compensation),
+    };
+    const scored = scoreJob(profile, input);
+    const saved = await saveScoredJob(env, user.id, scored, null, new Date().toISOString());
+    if (saved.duplicate) duplicates += 1;
+    const row = await env.DB.prepare("SELECT * FROM job_matches WHERE id = ? AND user_id = ?").bind(saved.id, user.id).first<Record<string, unknown>>();
+    if (row) importedRows.push(row);
+  }
+  const runId = crypto.randomUUID();
+  const qualifiedRows = importedRows.filter((row) => Number(row.match_score) >= 75 && row.status !== "SKIPPED");
+  const autoStaged = await autoStageJobs(importedRows.sort((a, b) => Number(b.match_score) - Number(a.match_score)), env, user, 75);
+  const report = {
+    sourceUrl,
+    portal,
+    rejected,
+    topOpportunities: importedRows.sort((a, b) => Number(b.match_score) - Number(a.match_score)).slice(0, 10).map(rowToJob),
+    highestPriority: selectHighestPriority(qualifiedRows, 3).map(rowToJob),
+    autoStaged,
+  };
+  const completedAt = new Date().toISOString();
+  await env.DB.prepare(
+    `INSERT INTO discovery_runs
+     (id, user_id, search_id, mode, status, providers_json, discovered, imported,
+      duplicates, qualified, report_json, started_at, completed_at)
+     VALUES (?, ?, NULL, 'PORTAL_CAPTURE', 'COMPLETED', ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).bind(
+    runId, user.id, JSON.stringify([{ provider: portal, discovered: jobs.length, imported: importedRows.length - duplicates, duplicates }]),
+    jobs.length, importedRows.length - duplicates, duplicates, qualifiedRows.length, JSON.stringify(report), startedAt, completedAt,
+  ).run();
+  return rowToDiscoveryRun({
+    id: runId, user_id: user.id, search_id: null, mode: "PORTAL_CAPTURE", status: "COMPLETED",
+    providers_json: JSON.stringify([{ provider: portal, discovered: jobs.length, imported: importedRows.length - duplicates, duplicates }]),
+    discovered: jobs.length, imported: importedRows.length - duplicates, duplicates, qualified: qualifiedRows.length,
+    report_json: JSON.stringify(report), started_at: startedAt, completed_at: completedAt,
+  });
+}
+
 function buildBrowserPacket(profile: CandidateProfile, job: Record<string, unknown>, packet: Record<string, unknown>) {
   const names = profile.name.trim().split(/\s+/);
   return {
@@ -896,7 +1311,7 @@ async function handleRoleSignalApi(request: Request, env: Env, url: URL) {
     ).bind(user.id, user.email, user.name, now).run();
 
     if (url.pathname === "/api/rolesignal/workspace" && request.method === "GET") {
-      const [resumes, preferences, profile, matches, sources, packets, vault, runs] = await Promise.all([
+      const [resumes, preferences, profile, matches, sources, packets, vault, runs, discoverySearches, discoveryRuns] = await Promise.all([
         env.DB.prepare(
           `SELECT id, filename, content_type, size_bytes, status, created_at
            FROM resumes WHERE user_id = ? ORDER BY created_at DESC LIMIT 10`,
@@ -920,6 +1335,12 @@ async function handleRoleSignalApi(request: Request, env: Env, url: URL) {
         env.DB.prepare(
           "SELECT * FROM search_runs WHERE user_id = ? ORDER BY completed_at DESC, started_at DESC LIMIT 20",
         ).bind(user.id).all(),
+        env.DB.prepare(
+          "SELECT * FROM discovery_searches WHERE user_id = ? AND active = 1 ORDER BY updated_at DESC LIMIT 20",
+        ).bind(user.id).all(),
+        env.DB.prepare(
+          "SELECT * FROM discovery_runs WHERE user_id = ? ORDER BY completed_at DESC, started_at DESC LIMIT 30",
+        ).bind(user.id).all(),
       ]);
       return json({
         user,
@@ -931,6 +1352,8 @@ async function handleRoleSignalApi(request: Request, env: Env, url: URL) {
         packets: (packets.results as Record<string, unknown>[]).map(rowToPacket),
         answerVault: vault.rows,
         searchRuns: (runs.results as Record<string, unknown>[]).map(rowToRun),
+        discoverySearches: (discoverySearches.results as Record<string, unknown>[]).map(rowToDiscoverySearch),
+        discoveryRuns: (discoveryRuns.results as Record<string, unknown>[]).map(rowToDiscoveryRun),
       });
     }
 
@@ -1048,6 +1471,16 @@ async function handleRoleSignalApi(request: Request, env: Env, url: URL) {
     if (url.pathname === "/api/rolesignal/jobs/import" && request.method === "POST") {
       const body = await request.json() as Record<string, unknown>;
       return json({ job: await importSingleJob(body, env, user, now) }, 201);
+    }
+
+    if (url.pathname === "/api/rolesignal/discovery/run" && request.method === "POST") {
+      const body = await request.json() as Record<string, unknown>;
+      return json({ run: await runDiscovery(body, env, user, now) }, 201);
+    }
+
+    if (url.pathname === "/api/rolesignal/discovery/capture" && request.method === "POST") {
+      const body = await request.json() as Record<string, unknown>;
+      return json({ run: await importPortalCapture(body, env, user, now) }, 201);
     }
 
     if (url.pathname === "/api/rolesignal/sources/scan" && request.method === "POST") {
@@ -1208,6 +1641,44 @@ async function handleRoleSignalApi(request: Request, env: Env, url: URL) {
         headers: {
           "content-type": "text/markdown; charset=utf-8",
           "content-disposition": `attachment; filename="rolesignal-run-${runId.slice(0, 8)}.md"`,
+          "cache-control": "no-store",
+        },
+      });
+    }
+
+    if (url.pathname === "/api/rolesignal/export/discovery-run.md" && request.method === "GET") {
+      const runId = url.searchParams.get("id") ?? "";
+      const row = await env.DB.prepare("SELECT * FROM discovery_runs WHERE id = ? AND user_id = ?").bind(runId, user.id).first<Record<string, unknown>>();
+      if (!row) return json({ error: "Discovery run not found." }, 404);
+      const run = rowToDiscoveryRun(row);
+      const report = run.report as { topOpportunities?: Array<Record<string, unknown>>; highestPriority?: Array<Record<string, unknown>>; failures?: Array<Record<string, unknown>>; portal?: string; sourceUrl?: string; autoStaged?: Array<Record<string, unknown>> };
+      const jobLines = (jobs: Array<Record<string, unknown>> = []) => jobs.map((job, index) => `${index + 1}. **${job.company} — ${job.role}** (${job.score}/100)\n   ${job.location} · ${job.platform} · ${job.applicationUrl}`).join("\n");
+      const markdown = [
+        "# RoleSignal Discovery Run",
+        `Mode: ${run.mode}`,
+        `Completed: ${run.completedAt ?? run.startedAt}`,
+        report.portal ? `Portal: ${report.portal}` : "",
+        report.sourceUrl ? `Source page: ${report.sourceUrl}` : "",
+        "",
+        "## Summary",
+        `- Jobs discovered: ${run.discovered}`,
+        `- New jobs imported: ${run.imported}`,
+        `- Duplicates merged: ${run.duplicates}`,
+        `- Qualified matches: ${run.qualified}`,
+        `- Application kits auto-staged: ${report.autoStaged?.length ?? 0}`,
+        "",
+        "## Highest Priority",
+        jobLines(report.highestPriority),
+        "",
+        "## Top Opportunities",
+        jobLines(report.topOpportunities),
+        "",
+        report.failures?.length ? `## Provider Issues\n${report.failures.map((failure) => `- ${failure.provider}: ${failure.message}`).join("\n")}` : "",
+      ].filter(Boolean).join("\n");
+      return new Response(markdown, {
+        headers: {
+          "content-type": "text/markdown; charset=utf-8",
+          "content-disposition": `attachment; filename="rolesignal-discovery-${runId.slice(0, 8)}.md"`,
           "cache-control": "no-store",
         },
       });

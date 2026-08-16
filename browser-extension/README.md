@@ -1,13 +1,14 @@
 # RoleSignal Browser Companion
 
-This Manifest V3 Chrome extension fills only evidence-backed profile fields and user-verified answer-vault fields from a RoleSignal application packet.
+This Manifest V3 Chrome extension captures visible job cards for RoleSignal discovery and fills only evidence-backed profile fields and user-verified answer-vault fields from an approved application packet.
 
 ## Install locally
 
 1. Extract `rolesignal-browser-companion.zip`.
 2. Open `chrome://extensions`, enable Developer mode, and choose **Load unpacked**.
 3. Select the extracted folder.
-4. In RoleSignal, prepare and approve an application, then copy its browser packet.
-5. Open the official application page, open the extension, paste the packet, and choose **Stage supported fields**.
+4. For discovery, open a LinkedIn, Naukri, Workday, Indeed, or company search-results page and choose **Capture visible jobs**.
+5. Paste the copied discovery batch into RoleSignal's **Discover jobs** tab.
+6. For applications, prepare and approve a job in RoleSignal, then paste its browser packet and choose **Stage supported fields**.
 
-The companion is intentionally host-locked, flags unknown required fields, never bypasses CAPTCHAs, and never clicks final submit. Version 0.3 maps recurring phone, portfolio, location, notice-period, compensation, authorization, and relocation fields when those answers were explicitly saved in RoleSignal.
+The companion reads only job cards present in the active page, does not paginate or bypass access controls, and never sends portal credentials to RoleSignal. Application fill remains host-locked, flags unknown required fields, never bypasses CAPTCHAs, and never clicks final submit. Version 0.4 also maps recurring phone, portfolio, location, notice-period, compensation, authorization, and relocation fields when those answers were explicitly saved in RoleSignal.

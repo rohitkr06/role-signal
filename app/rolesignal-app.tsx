@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent } from "react";
 
-type View = "dashboard" | "matches" | "sources" | "runs" | "autopilot" | "applications" | "profile";
+type View = "dashboard" | "discovery" | "matches" | "sources" | "runs" | "autopilot" | "applications" | "profile";
 
 type Profile = {
   name: string;
@@ -93,6 +93,42 @@ type SearchRun = {
   };
 };
 
+type DiscoverySearch = {
+  id: string;
+  name: string;
+  keywords: string[];
+  locations: string[];
+  workModes: string[];
+  portals: string[];
+  minScore: number;
+  active: boolean;
+  lastRunAt?: string;
+};
+
+type DiscoveryRun = {
+  id: string;
+  searchId?: string;
+  mode: string;
+  status: string;
+  providers: Array<{ provider: string; discovered: number; relevant?: number; imported: number; duplicates: number }>;
+  discovered: number;
+  imported: number;
+  duplicates: number;
+  qualified: number;
+  cached?: boolean;
+  report: {
+    topOpportunities?: MatchJob[];
+    highestPriority?: MatchJob[];
+    failures?: Array<{ provider: string; message: string }>;
+    autoStaged?: Array<{ packetId: string; jobId: string; status: string }>;
+    portal?: string;
+    sourceUrl?: string;
+    rejected?: number;
+  };
+  startedAt: string;
+  completedAt?: string;
+};
+
 type Workspace = {
   profile: Profile;
   jobs: MatchJob[];
@@ -102,6 +138,8 @@ type Workspace = {
   preferences?: { match_threshold?: number; daily_limit?: number; auto_apply?: number };
   answerVault: AnswerVaultRow[];
   searchRuns: SearchRun[];
+  discoverySearches: DiscoverySearch[];
+  discoveryRuns: DiscoveryRun[];
 };
 
 type ScanReport = {
@@ -201,12 +239,13 @@ const fallbackProfile: Profile = {
 
 const navItems: Array<{ id: View; label: string; mark: string }> = [
   { id: "dashboard", label: "Overview", mark: "01" },
-  { id: "matches", label: "Matches", mark: "02" },
-  { id: "sources", label: "Job sources", mark: "03" },
-  { id: "runs", label: "Run center", mark: "04" },
-  { id: "autopilot", label: "Autopilot", mark: "05" },
-  { id: "applications", label: "Applications", mark: "06" },
-  { id: "profile", label: "Career profile", mark: "07" },
+  { id: "discovery", label: "Discover jobs", mark: "02" },
+  { id: "matches", label: "Matches", mark: "03" },
+  { id: "sources", label: "Company boards", mark: "04" },
+  { id: "runs", label: "ATS runs", mark: "05" },
+  { id: "autopilot", label: "Autopilot", mark: "06" },
+  { id: "applications", label: "Applications", mark: "07" },
+  { id: "profile", label: "Career profile", mark: "08" },
 ];
 
 const answerFields = [
@@ -246,6 +285,7 @@ export function RoleSignalApp() {
   const [packets, setPackets] = useState<ApplicationPacket[]>([]);
   const [sources, setSources] = useState<Workspace["sources"]>([]);
   const [searchRuns, setSearchRuns] = useState<SearchRun[]>([]);
+  const [discoveryRuns, setDiscoveryRuns] = useState<DiscoveryRun[]>([]);
   const [answerVault, setAnswerVault] = useState<AnswerVaultRow[]>([]);
   const [answerValues, setAnswerValues] = useState<Record<string, string>>({
     phone: "",
@@ -270,12 +310,29 @@ export function RoleSignalApp() {
   const [scanReport, setScanReport] = useState<ScanReport | null>(null);
   const [sourceForm, setSourceForm] = useState({ provider: "greenhouse", token: "", label: "" });
   const [jobForm, setJobForm] = useState({ jobUrl: "", company: "", role: "", location: "", postedDate: "", description: "" });
+  const [discoveryForm, setDiscoveryForm] = useState({
+    name: "Backend roles / India + Remote",
+    keywords: "Backend Engineer, Software Engineer, Platform Engineer, Node.js",
+    locations: "India, Remote, APAC",
+    workModes: ["Remote", "Hybrid"],
+    minScore: 75,
+  });
+  const [captureText, setCaptureText] = useState("");
   const fileInput = useRef<HTMLInputElement>(null);
 
   const displayJobs = liveJobs.length ? liveJobs : sampleJobs;
   const qualifiedJobs = useMemo(() => liveJobs.filter((job) => job.score >= threshold && job.status !== "SKIPPED"), [liveJobs, threshold]);
   const needsAttention = packets.filter((packet) => packet.status === "NEEDS_INPUT").length;
   const latestRun = searchRuns[0];
+  const latestDiscovery = discoveryRuns[0];
+  const primaryKeyword = discoveryForm.keywords.split(",")[0]?.trim() || "Backend Engineer";
+  const primaryLocation = discoveryForm.locations.split(",")[0]?.trim() || "India";
+  const portalSearches = [
+    { name: "LinkedIn", mark: "in", note: "Signed-in search", url: `https://www.linkedin.com/jobs/search/?keywords=${encodeURIComponent(primaryKeyword)}&location=${encodeURIComponent(primaryLocation)}` },
+    { name: "Naukri", mark: "N", note: "India job search", url: `https://www.naukri.com/jobs-in-india?k=${encodeURIComponent(primaryKeyword)}&l=${encodeURIComponent(primaryLocation)}` },
+    { name: "Indeed", mark: "i", note: "India listings", url: `https://in.indeed.com/jobs?q=${encodeURIComponent(primaryKeyword)}&l=${encodeURIComponent(primaryLocation)}` },
+    { name: "Google Jobs", mark: "G", note: "Wider web search", url: `https://www.google.com/search?q=${encodeURIComponent(`${primaryKeyword} jobs ${primaryLocation}`)}` },
+  ];
 
   useEffect(() => {
     void loadWorkspace();
@@ -295,6 +352,17 @@ export function RoleSignalApp() {
       setPackets(data.packets || []);
       setSources(data.sources || []);
       setSearchRuns(data.searchRuns || []);
+      setDiscoveryRuns(data.discoveryRuns || []);
+      if (data.discoverySearches?.[0]) {
+        const search = data.discoverySearches[0];
+        setDiscoveryForm({
+          name: search.name,
+          keywords: search.keywords.join(", "),
+          locations: search.locations.join(", "),
+          workModes: search.workModes,
+          minScore: search.minScore,
+        });
+      }
       setAnswerVault(data.answerVault || []);
       setAnswerValues((current) => ({
         ...current,
@@ -459,6 +527,59 @@ export function RoleSignalApp() {
     }
   }
 
+  async function runDiscovery(event?: FormEvent) {
+    event?.preventDefault();
+    setBusy("discovery-run");
+    try {
+      const result = await api<{ run: DiscoveryRun }>("/api/rolesignal/discovery/run", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          ...discoveryForm,
+          keywords: discoveryForm.keywords.split(",").map((value) => value.trim()).filter(Boolean),
+          locations: discoveryForm.locations.split(",").map((value) => value.trim()).filter(Boolean),
+          portals: ["Jobicy", "Arbeitnow", "Connected ATS boards"],
+        }),
+      });
+      await loadWorkspace();
+      setView("discovery");
+      setToast(result.run.cached ? "Public feeds refresh hourly. Showing the latest matching discovery run." : `Discovery complete: ${result.run.qualified} qualified matches from ${result.run.discovered} listings.`);
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "The discovery run could not finish.");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function importPortalCapture(event: FormEvent) {
+    event.preventDefault();
+    setBusy("capture-import");
+    try {
+      const batch = JSON.parse(captureText) as Record<string, unknown>;
+      const result = await api<{ run: DiscoveryRun }>("/api/rolesignal/discovery/capture", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ batch }),
+      });
+      setCaptureText("");
+      await loadWorkspace();
+      setToast(`Imported ${result.run.imported} new portal jobs; ${result.run.duplicates} duplicates were merged.`);
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "The portal capture could not be imported.");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function pasteCapture() {
+    try {
+      setCaptureText(await navigator.clipboard.readText());
+      setToast("Discovery batch pasted from the browser companion.");
+    } catch {
+      setToast("Clipboard access was blocked. Paste the discovery batch manually.");
+    }
+  }
+
   async function saveAnswerVault(event: FormEvent) {
     event.preventDefault();
     setBusy("answer-vault");
@@ -569,13 +690,14 @@ export function RoleSignalApp() {
         <div className="workspace-switcher">
           <span className="workspace-avatar">RK</span>
           <span><strong>{profile.name}</strong><small>{profile.title}</small></span>
-          <b>v3</b>
+          <b>v4</b>
         </div>
         <nav aria-label="Primary navigation">
           <p className="nav-label">Workspace</p>
           {navItems.map((item) => (
             <button key={item.id} className={view === item.id ? "nav-item active" : "nav-item"} onClick={() => setView(item.id)}>
               <span>{item.mark}</span>{item.label}
+              {item.id === "discovery" && discoveryRuns.length > 0 && <b>{discoveryRuns.length}</b>}
               {item.id === "matches" && <b>{liveJobs.length}</b>}
               {item.id === "runs" && searchRuns.length > 0 && <b>{searchRuns.length}</b>}
               {item.id === "applications" && packets.length > 0 && <b>{packets.length}</b>}
@@ -600,7 +722,7 @@ export function RoleSignalApp() {
           </select>
           <div className="top-actions">
             <span className="secure-pill"><i /> Evidence-locked</span>
-            <span className="phase-pill">Phase 3</span>
+            <span className="phase-pill">Phase 4</span>
             <button className="avatar-button" aria-label="Career profile">RK</button>
           </div>
         </header>
@@ -609,17 +731,18 @@ export function RoleSignalApp() {
           <div className="page dashboard-page">
             <section className="hero-row">
               <div>
-                <span className="eyebrow">Live matching workspace</span>
+                <span className="eyebrow">Cross-portal discovery workspace</span>
                 <h1>Find work worth applying for.</h1>
-                <p>{liveJobs.length ? `${liveJobs.length} live roles have been scored against verified engineering evidence.` : "Connect a company career board or import a job to replace the curated samples."}</p>
+                <p>{liveJobs.length ? `${liveJobs.length} roles from public feeds, company boards and portal captures have been scored against verified engineering evidence.` : "Run discovery across public feeds, company boards and browser-assisted job portals."}</p>
               </div>
-              {sources.length ? <button className="primary-button" disabled={busy === "scan-all"} onClick={() => void runAllSources()}><span>&#8599;</span>{busy === "scan-all" ? "Running search..." : "Run all sources"}</button> : <button className="primary-button" onClick={() => setView("sources")}><span>+</span> Add job source</button>}
+              <button className="primary-button" disabled={busy === "discovery-run"} onClick={() => void runDiscovery()}><span>&#8599;</span>{busy === "discovery-run" ? "Searching feeds..." : "Discover matching jobs"}</button>
             </section>
 
+            {latestDiscovery && <section className="latest-run-strip discovery-strip"><div><span className={`run-status ${latestDiscovery.status.toLowerCase()}`}>{readableStatus(latestDiscovery.status)}</span><span><strong>Latest cross-portal discovery</strong><small>{latestDiscovery.discovered} listings checked / {latestDiscovery.imported} new / {latestDiscovery.qualified} qualified / {postedLabel(latestDiscovery.completedAt || latestDiscovery.startedAt)}</small></span></div><button className="text-button" onClick={() => setView("discovery")}>Open discovery -&gt;</button></section>}
             {latestRun && <section className="latest-run-strip"><div><span className={`run-status ${latestRun.status.toLowerCase()}`}>{readableStatus(latestRun.status)}</span><span><strong>Latest search run</strong><small>{latestRun.uniqueJobs} unique jobs / {latestRun.ready} ready to review / {postedLabel(latestRun.completedAt || latestRun.startedAt)}</small></span></div><button className="text-button" onClick={() => setView("runs")}>Open run center -&gt;</button></section>}
 
             <section className="metric-grid" aria-label="Job search metrics">
-              <Metric label="Live roles" value={String(liveJobs.length)} note={sources.length ? `${sources.length} connected sources` : "Awaiting first source"} trend={liveJobs.length ? "up" : "neutral"} />
+              <Metric label="Live roles" value={String(liveJobs.length)} note={latestDiscovery ? `${latestDiscovery.providers.length} discovery providers` : "Ready for discovery"} trend={liveJobs.length ? "up" : "neutral"} />
               <Metric label="Strong matches" value={String(liveJobs.filter((job) => job.score >= 82).length)} note="82+ match score" trend="up" />
               <Metric label="Ready to review" value={String(qualifiedJobs.length)} note={`Threshold ${threshold}+`} trend="neutral" />
               <Metric label="Needs attention" value={String(needsAttention)} note="Unknown required answers" trend={needsAttention ? "warn" : "up"} />
@@ -627,8 +750,8 @@ export function RoleSignalApp() {
 
             {!liveJobs.length && workspaceLoaded && (
               <section className="setup-banner">
-                <div><span className="card-kicker">Curated preview</span><h3>Your data path is ready.</h3><p>The roles below demonstrate scoring. Connect Greenhouse or Lever, or paste any official job URL, to create live matches.</p></div>
-                <button className="secondary-button" onClick={() => setView("sources")}>Connect first source</button>
+                <div><span className="card-kicker">Curated preview</span><h3>Your discovery engine is ready.</h3><p>The roles below demonstrate scoring. Run public discovery or capture a signed-in LinkedIn, Naukri, Workday, or Indeed results page.</p></div>
+                <button className="secondary-button" onClick={() => setView("discovery")}>Open discovery</button>
               </section>
             )}
 
@@ -662,9 +785,53 @@ export function RoleSignalApp() {
           </div>
         )}
 
+        {view === "discovery" && (
+          <div className="page inner-page discovery-page">
+            <PageTitle eyebrow="Market-wide discovery" title="Search beyond one company" copy="Combine broad public feeds, connected company boards and jobs captured from your signed-in portal searches. Every listing enters the same resume-scoring pipeline." action={busy === "discovery-run" ? "Searching feeds..." : "Run public discovery"} actionDisabled={busy === "discovery-run"} onAction={() => void runDiscovery()} />
+
+            <section className="discovery-hero-grid">
+              <form className="discovery-config-card" onSubmit={runDiscovery}>
+                <div className="card-heading"><div><span className="card-kicker">Saved search profile</span><h2>What should RoleSignal hunt for?</h2></div><span className="verified-tag">Resume-linked</span></div>
+                <label>Search name<input value={discoveryForm.name} onChange={(event) => setDiscoveryForm({ ...discoveryForm, name: event.target.value })} /></label>
+                <label>Target roles and technologies<input value={discoveryForm.keywords} onChange={(event) => setDiscoveryForm({ ...discoveryForm, keywords: event.target.value })} placeholder="Backend Engineer, Platform Engineer, Node.js" /><small>Separate targets with commas.</small></label>
+                <label>Locations<input value={discoveryForm.locations} onChange={(event) => setDiscoveryForm({ ...discoveryForm, locations: event.target.value })} placeholder="India, Remote, APAC" /></label>
+                <div className="discovery-controls"><label>Minimum match<input type="number" min={65} max={95} value={discoveryForm.minScore} onChange={(event) => setDiscoveryForm({ ...discoveryForm, minScore: Number(event.target.value) })} /></label><div><span>Work modes</span><div className="mode-pills">{["Remote", "Hybrid", "On-site"].map((mode) => <button type="button" key={mode} className={discoveryForm.workModes.includes(mode) ? "active" : ""} onClick={() => setDiscoveryForm({ ...discoveryForm, workModes: discoveryForm.workModes.includes(mode) ? discoveryForm.workModes.filter((value) => value !== mode) : [...discoveryForm.workModes, mode] })}>{mode}</button>)}</div></div></div>
+                <button className="primary-button wide" disabled={busy === "discovery-run"}>{busy === "discovery-run" ? "Fetching, deduplicating and scoring..." : "Search public feeds and company boards"}</button>
+                <p className="refresh-note">Public feeds refresh at most once per hour. Existing results are reused between refreshes.</p>
+              </form>
+
+              <aside className="coverage-card">
+                <span className="card-kicker">Coverage map</span><h2>Three discovery lanes</h2><p>No single API covers the whole job market. RoleSignal combines the reliable paths without bypassing logins or bot protection.</p>
+                <div className="coverage-row"><span className="coverage-mark public">01</span><span><strong>Public job feeds</strong><small>Jobicy remote roles + Arbeitnow aggregated ATS listings</small></span><b>Automatic</b></div>
+                <div className="coverage-row"><span className="coverage-mark ats">02</span><span><strong>Company ATS boards</strong><small>{sources.length ? `${sources.length} Greenhouse / Lever boards connected` : "Connect Greenhouse or Lever boards"}</small></span><b>Automatic</b></div>
+                <div className="coverage-row"><span className="coverage-mark portal">03</span><span><strong>Signed-in portals</strong><small>LinkedIn, Naukri, Workday and Indeed via companion capture</small></span><b>Assisted</b></div>
+                <a className="download-button" href="/rolesignal-browser-companion.zip" download>Download Discovery Companion v0.4</a>
+              </aside>
+            </section>
+
+            <section className="portal-search-section">
+              <div className="section-heading"><div><span className="eyebrow">Authenticated portal searches</span><h2>Launch your search, then capture visible jobs</h2></div><span className="quiet-label">Your login stays in your browser</span></div>
+              <div className="portal-grid">{portalSearches.map((portal) => <a key={portal.name} href={portal.url} target="_blank" rel="noreferrer"><span className="portal-mark">{portal.mark}</span><span><strong>{portal.name}</strong><small>{portal.note}</small></span><b>-&gt;</b></a>)}<div className="portal-info"><span className="portal-mark">W</span><span><strong>Workday</strong><small>Open a company&apos;s Workday careers page</small></span><b>Per company</b></div></div>
+            </section>
+
+            <section className="capture-workflow">
+              <div className="capture-instructions"><span className="card-kicker">Browser-assisted capture</span><h2>Bring signed-in results into RoleSignal</h2><ol><li><b>1</b><span>Open a results page on LinkedIn, Naukri, Workday or Indeed.</span></li><li><b>2</b><span>Open the RoleSignal companion and choose <strong>Capture visible jobs</strong>.</span></li><li><b>3</b><span>Paste the copied discovery batch here and import it.</span></li></ol><p>The companion reads only the job cards visible in your active tab. It does not crawl hidden pages, bypass CAPTCHAs or submit applications.</p></div>
+              <form className="capture-import-card" onSubmit={importPortalCapture}><div className="card-heading"><span className="card-kicker">Discovery batch</span><button type="button" onClick={() => void pasteCapture()}>Paste from clipboard</button></div><textarea required rows={9} value={captureText} onChange={(event) => setCaptureText(event.target.value)} placeholder={'Paste JSON from the browser companion\n{ "captureVersion": 1, "portal": "LinkedIn", "jobs": [...] }'} /><button className="primary-button wide" disabled={busy === "capture-import"}>{busy === "capture-import" ? "Normalizing and scoring..." : "Import captured jobs"}</button></form>
+            </section>
+
+            {latestDiscovery && <section className="discovery-results">
+              <div className="discovery-results-head"><div><span className="card-kicker">Latest discovery / {readableStatus(latestDiscovery.mode)}</span><h2>{latestDiscovery.qualified} qualified matches surfaced</h2><p>{latestDiscovery.discovered} listings inspected, {latestDiscovery.imported} new jobs imported and {latestDiscovery.duplicates} duplicates merged.</p></div><div><span className={`run-status ${latestDiscovery.status.toLowerCase()}`}>{readableStatus(latestDiscovery.status)}</span><a className="secondary-button" href={`/api/rolesignal/export/discovery-run.md?id=${encodeURIComponent(latestDiscovery.id)}`} download>Download report</a></div></div>
+              <div className="provider-strip">{latestDiscovery.providers.map((provider) => <span key={provider.provider}><strong>{provider.provider}</strong><small>{provider.discovered} checked / {provider.imported} new</small></span>)}</div>
+              {(latestDiscovery.report.highestPriority || []).length ? <><div className="section-heading discovery-priority-heading"><div><span className="eyebrow">Highest priority</span><h2>Best applications from this run</h2></div><button className="text-button" onClick={() => setView("matches")}>Review full match list -&gt;</button></div><div className="priority-grid">{(latestDiscovery.report.highestPriority || []).map((job, index) => <article className="priority-card" key={job.id}><span className="priority-number">0{index + 1}</span><span className="card-kicker">{job.company} / {job.platform}</span><h3>{job.role}</h3><p>{job.location} / {job.workMode}</p><div className="priority-score"><strong>{job.score}</strong><span>match<br />score</span></div><button className="text-button" onClick={() => void prepareApplication(job)}>Prepare application -&gt;</button></article>)}</div></> : <div className="discovery-no-match"><strong>No qualified roles in this run.</strong><span>Broaden the location or role terms, or capture another portal results page.</span></div>}
+            </section>}
+
+            {discoveryRuns.length > 0 && <section className="run-history discovery-history"><div className="section-heading"><div><span className="eyebrow">Discovery history</span><h2>Public and portal runs together</h2></div></div>{discoveryRuns.slice(0, 8).map((run) => <div className="run-row" key={run.id}><span className={`run-status ${run.status.toLowerCase()}`}>{readableStatus(run.status)}</span><span><strong>{readableStatus(run.mode)}</strong><small>{postedLabel(run.completedAt || run.startedAt)} / {run.discovered} checked / {run.imported} new</small></span><span><b>{run.qualified}</b><small>qualified</small></span><a href={`/api/rolesignal/export/discovery-run.md?id=${encodeURIComponent(run.id)}`} download>Report</a></div>)}</section>}
+          </div>
+        )}
+
         {view === "matches" && (
           <div className="page inner-page">
-            <PageTitle eyebrow="Explainable matching" title="Every score has receipts" copy="Backend fit, distributed systems, stack proximity, infrastructure and role quality remain separately inspectable." action="Import another job" onAction={() => setView("sources")} />
+            <PageTitle eyebrow="Explainable matching" title="Every score has receipts" copy="Backend fit, distributed systems, stack proximity, infrastructure and role quality remain separately inspectable." action="Discover more jobs" onAction={() => setView("discovery")} />
             <div className="filter-row">
               <span className="filter active">All {displayJobs.length}</span>
               <span className="filter">Exceptional {displayJobs.filter((job) => job.score >= 90).length}</span>

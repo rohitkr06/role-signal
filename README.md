@@ -2,7 +2,7 @@
 
 RoleSignal is an explainable job-matching and approval-first application workspace for backend engineers. It optimizes for interview probability, role quality, and career upside instead of application volume.
 
-## Phase 3 capabilities
+## Phase 4 capabilities
 
 - Extracts text from PDF, DOCX, and TXT resumes and stores the source file in R2.
 - Maintains a verified career profile in D1 without inventing unsupported claims.
@@ -17,6 +17,11 @@ RoleSignal is an explainable job-matching and approval-first application workspa
 - Stores recurring, explicitly verified application answers in a private answer vault.
 - Generates reusable application kits with role strategy, a grounded `why this role` answer, resume changes, and supporting evidence.
 - Exports the application ledger as CSV for portfolio analysis or follow-up tracking.
+- Runs a saved discovery profile across Jobicy, Arbeitnow, and every connected company ATS board.
+- Enforces an hourly public-feed refresh window, normalizes provider data, and merges duplicate roles.
+- Launches targeted LinkedIn, Naukri, Indeed, and wider web searches from one Discovery workspace.
+- Imports visible LinkedIn, Naukri, Workday, Indeed, and company-portal job cards captured by the Chrome companion.
+- Keeps public-feed runs and authenticated portal captures in one durable discovery history.
 
 ## Safety model
 
@@ -45,7 +50,7 @@ npm run db:generate
 
 ## Browser companion
 
-The extension source is in `browser-extension/`. Load it unpacked from `chrome://extensions`, or download the generated zip from the running app.
+The extension source is in `browser-extension/`. Load it unpacked from `chrome://extensions`, or download the generated zip from the running app. Version 0.4 can capture job cards visible on the active portal results page and copy a normalized discovery batch back to RoleSignal.
 
 ## Publish to GitHub
 
@@ -55,9 +60,10 @@ Create an empty repository on GitHub, then add it as the local `origin` and push
 
 - Vinext / React 19 interface
 - Cloudflare Worker API
-- D1 for profiles, job matches, preferences, verified answers, search runs, application kits, packets, and audit events
+- D1 for profiles, job matches, preferences, verified answers, saved discovery searches, discovery runs, application kits, packets, and audit events
 - R2 for resume files
 - Drizzle schema and checked-in SQL migrations
-- Public Greenhouse Job Board and Lever Postings APIs for source scanning
+- Public Greenhouse, Lever, Jobicy, and Arbeitnow feeds for server-side discovery
+- Browser-assisted capture for portals that depend on a signed-in user session
 
 The OpenAI analysis path is intentionally not enabled until a server-side API key is configured. The current release uses deterministic, auditable extraction and scoring.
