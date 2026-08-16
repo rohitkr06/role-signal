@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "RoleSignal Browser Companion",
-  "version": "0.2.0",
-  "description": "Fills evidence-backed application fields without clicking final submit.",
+  "version": "0.3.0",
+  "description": "Fills verified profile and answer-vault fields without clicking final submit.",
   "permissions": ["activeTab", "scripting", "storage"],
   "action": {
     "default_title": "RoleSignal",

@@ -123,3 +123,54 @@ export const applicationEvents = sqliteTable("application_events", {
   detailJson: text("detail_json").notNull(),
   createdAt: text("created_at").notNull(),
 }, (table) => [index("idx_application_events_packet").on(table.packetId)]);
+
+export const answerVault = sqliteTable("answer_vault", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull(),
+  fieldKey: text("field_key").notNull(),
+  label: text("label").notNull(),
+  value: text("value").notNull(),
+  status: text("status").notNull(),
+  sensitive: integer("sensitive", { mode: "boolean" }).notNull(),
+  updatedAt: text("updated_at").notNull(),
+}, (table) => [
+  uniqueIndex("idx_answer_vault_user_field").on(table.userId, table.fieldKey),
+]);
+
+export const searchRuns = sqliteTable("search_runs", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull(),
+  status: text("status").notNull(),
+  sourceCount: integer("source_count").notNull(),
+  jobsDiscovered: integer("jobs_discovered").notNull(),
+  uniqueJobs: integer("unique_jobs").notNull(),
+  analyzed: integer("analyzed").notNull(),
+  exceptional: integer("exceptional").notNull(),
+  strong: integer("strong").notNull(),
+  ready: integer("ready").notNull(),
+  needsInput: integer("needs_input").notNull(),
+  skipped: integer("skipped").notNull(),
+  reportJson: text("report_json").notNull(),
+  startedAt: text("started_at").notNull(),
+  completedAt: text("completed_at"),
+}, (table) => [
+  index("idx_search_runs_user_completed").on(table.userId, table.completedAt),
+]);
+
+export const applicationKits = sqliteTable("application_kits", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull(),
+  jobId: text("job_id").notNull(),
+  packetId: text("packet_id").notNull(),
+  summary: text("summary").notNull(),
+  whyAnswer: text("why_answer").notNull(),
+  resumeChangesJson: text("resume_changes_json").notNull(),
+  evidenceJson: text("evidence_json").notNull(),
+  formAnswersJson: text("form_answers_json").notNull(),
+  status: text("status").notNull(),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+}, (table) => [
+  uniqueIndex("idx_application_kits_user_job").on(table.userId, table.jobId),
+  index("idx_application_kits_packet").on(table.packetId),
+]);

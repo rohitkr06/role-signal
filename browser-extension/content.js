@@ -51,8 +51,17 @@ function fieldKey(context) {
     ["last_name", /last\s*name|surname|last_name|lastname/],
     ["full_name", /full\s*name|candidate\s*name|your\s*name|^name$/],
     ["email", /e-?mail/],
+    ["phone", /phone|mobile|telephone/],
+    ["linkedin_url", /linkedin/],
+    ["github_url", /github/],
+    ["current_location", /current\s*location|where\s*(are\s*)?you\s*located|city\s*(of\s*)?residence/],
     ["current_company", /current\s*(company|employer)|organization/],
     ["current_title", /current\s*(title|role)|job\s*title/],
+    ["notice_period", /notice\s*period|available\s*to\s*start|joining\s*time/],
+    ["current_compensation", /current\s*(compensation|salary|ctc)/],
+    ["expected_compensation", /expected\s*(compensation|salary|ctc)|salary\s*expectation/],
+    ["work_authorization", /work\s*authorization|legally\s*authorized|visa\s*(status|sponsorship)|require\s*sponsorship/],
+    ["relocation", /relocat/],
   ];
   return rules.find(([, pattern]) => pattern.test(context))?.[0] || "";
 }

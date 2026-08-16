@@ -2,7 +2,7 @@
 
 RoleSignal is an explainable job-matching and approval-first application workspace for backend engineers. It optimizes for interview probability, role quality, and career upside instead of application volume.
 
-## Phase 2 capabilities
+## Phase 3 capabilities
 
 - Extracts text from PDF, DOCX, and TXT resumes and stores the source file in R2.
 - Maintains a verified career profile in D1 without inventing unsupported claims.
@@ -12,6 +12,11 @@ RoleSignal is an explainable job-matching and approval-first application workspa
 - Deduplicates on company, role, and location while preferring official URLs.
 - Prepares application packets, resume-ordering guidance, blockers, and an audit trail.
 - Includes a Chrome companion that fills supported fields but never submits.
+- Runs every connected source in one resilient batch and keeps a durable search report.
+- Ranks a focused top three across companies and exports the full run as Markdown.
+- Stores recurring, explicitly verified application answers in a private answer vault.
+- Generates reusable application kits with role strategy, a grounded `why this role` answer, resume changes, and supporting evidence.
+- Exports the application ledger as CSV for portfolio analysis or follow-up tracking.
 
 ## Safety model
 
@@ -50,7 +55,7 @@ Create an empty repository on GitHub, then add it as the local `origin` and push
 
 - Vinext / React 19 interface
 - Cloudflare Worker API
-- D1 for profiles, job matches, preferences, packets, and audit events
+- D1 for profiles, job matches, preferences, verified answers, search runs, application kits, packets, and audit events
 - R2 for resume files
 - Drizzle schema and checked-in SQL migrations
 - Public Greenhouse Job Board and Lever Postings APIs for source scanning

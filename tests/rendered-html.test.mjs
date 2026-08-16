@@ -23,7 +23,7 @@ test("server-renders the RoleSignal product shell", async () => {
   assert.doesNotMatch(html, /Your site is taking shape|react-loading-skeleton/);
 });
 
-test("keeps Phase 2 safety and persistence contracts in source", async () => {
+test("keeps Phase 3 operations, safety, and persistence contracts in source", async () => {
   const [worker, app, schema, extension] = await Promise.all([
     readFile(new URL("../worker/index.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/rolesignal-app.tsx", import.meta.url), "utf8"),
@@ -31,12 +31,25 @@ test("keeps Phase 2 safety and persistence contracts in source", async () => {
     readFile(new URL("../browser-extension/content.js", import.meta.url), "utf8"),
   ]);
   assert.match(worker, /\/api\/rolesignal\/sources\/scan/);
+  assert.match(worker, /\/api\/rolesignal\/sources\/scan-all/);
+  assert.match(worker, /\/api\/rolesignal\/sources\/remove/);
+  assert.match(worker, /\/api\/rolesignal\/answers/);
+  assert.match(worker, /\/api\/rolesignal\/applications\/kit/);
+  assert.match(worker, /\/api\/rolesignal\/export\/ledger\.csv/);
+  assert.match(worker, /\/api\/rolesignal\/export\/run\.md/);
+  assert.match(worker, /autoStaged/);
   assert.match(worker, /\/api\/rolesignal\/applications\/approve/);
   assert.match(worker, /neverSubmit:\s*true/);
   assert.match(schema, /applicationPackets/);
+  assert.match(schema, /answerVault/);
+  assert.match(schema, /searchRuns/);
+  assert.match(schema, /applicationKits/);
   assert.match(schema, /idx_job_matches_user_fingerprint/);
   assert.match(app, /extractText\(new Uint8Array/);
   assert.match(app, /extractRawText/);
+  assert.match(app, /Verified answer vault/);
+  assert.match(app, /One run\. Every connected source/);
+  assert.match(extension, /work_authorization/);
   assert.match(extension, /neverSubmit/);
   assert.doesNotMatch(extension, /\.click\(\)|requestSubmit|\.submit\(/);
 });

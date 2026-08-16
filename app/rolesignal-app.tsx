@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent } from "react";
 
-type View = "dashboard" | "matches" | "sources" | "autopilot" | "applications" | "profile";
+type View = "dashboard" | "matches" | "sources" | "runs" | "autopilot" | "applications" | "profile";
 
 type Profile = {
   name: string;
@@ -50,6 +50,47 @@ type ApplicationPacket = {
   role: string;
   applicationUrl: string;
   score: number;
+  kit?: {
+    id: string;
+    summary: string;
+    whyAnswer: string;
+    resumeChanges: string[];
+    evidence: string[];
+    formAnswers: Record<string, string>;
+    status: string;
+  };
+};
+
+type AnswerVaultRow = {
+  field_key: string;
+  label: string;
+  value: string;
+  status: string;
+  sensitive: number;
+  updated_at: string;
+};
+
+type SearchRun = {
+  id: string;
+  status: string;
+  sourceCount: number;
+  jobsDiscovered: number;
+  uniqueJobs: number;
+  analyzed: number;
+  exceptional: number;
+  strong: number;
+  ready: number;
+  needsInput: number;
+  skipped: number;
+  startedAt: string;
+  completedAt?: string;
+  report: {
+    topOpportunities?: MatchJob[];
+    highestPriority?: MatchJob[];
+    failures?: Array<{ source: string; message: string }>;
+    autoStaged?: Array<{ packetId: string; jobId: string; status: string }>;
+    autoStageFailures?: Array<{ jobId: string; message: string }>;
+  };
 };
 
 type Workspace = {
@@ -59,6 +100,8 @@ type Workspace = {
   sources: Array<{ id: string; provider: string; source_token: string; label: string; last_scanned_at?: string }>;
   resumes: Array<{ id: string; filename: string; status: string }>;
   preferences?: { match_threshold?: number; daily_limit?: number; auto_apply?: number };
+  answerVault: AnswerVaultRow[];
+  searchRuns: SearchRun[];
 };
 
 type ScanReport = {
@@ -160,10 +203,23 @@ const navItems: Array<{ id: View; label: string; mark: string }> = [
   { id: "dashboard", label: "Overview", mark: "01" },
   { id: "matches", label: "Matches", mark: "02" },
   { id: "sources", label: "Job sources", mark: "03" },
-  { id: "autopilot", label: "Autopilot", mark: "04" },
-  { id: "applications", label: "Applications", mark: "05" },
-  { id: "profile", label: "Career profile", mark: "06" },
+  { id: "runs", label: "Run center", mark: "04" },
+  { id: "autopilot", label: "Autopilot", mark: "05" },
+  { id: "applications", label: "Applications", mark: "06" },
+  { id: "profile", label: "Career profile", mark: "07" },
 ];
+
+const answerFields = [
+  { key: "phone", label: "Phone number", placeholder: "+91 ...", sensitive: true },
+  { key: "linkedin_url", label: "LinkedIn URL", placeholder: "https://linkedin.com/in/...", sensitive: false },
+  { key: "github_url", label: "GitHub URL", placeholder: "https://github.com/...", sensitive: false },
+  { key: "current_location", label: "Current location", placeholder: "Bengaluru, India", sensitive: false },
+  { key: "notice_period", label: "Notice period", placeholder: "30 days", sensitive: true },
+  { key: "current_compensation", label: "Current compensation", placeholder: "Enter only if you want it reused", sensitive: true },
+  { key: "expected_compensation", label: "Expected compensation", placeholder: "Enter only if you want it reused", sensitive: true },
+  { key: "work_authorization", label: "Work authorization", placeholder: "Authorized to work in India", sensitive: true },
+  { key: "relocation", label: "Relocation preference", placeholder: "Open to Bengaluru / remote only", sensitive: true },
+] as const;
 
 async function api<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(path, options);
@@ -189,6 +245,19 @@ export function RoleSignalApp() {
   const [liveJobs, setLiveJobs] = useState<MatchJob[]>([]);
   const [packets, setPackets] = useState<ApplicationPacket[]>([]);
   const [sources, setSources] = useState<Workspace["sources"]>([]);
+  const [searchRuns, setSearchRuns] = useState<SearchRun[]>([]);
+  const [answerVault, setAnswerVault] = useState<AnswerVaultRow[]>([]);
+  const [answerValues, setAnswerValues] = useState<Record<string, string>>({
+    phone: "",
+    linkedin_url: "",
+    github_url: "",
+    current_location: "",
+    notice_period: "",
+    current_compensation: "",
+    expected_compensation: "",
+    work_authorization: "",
+    relocation: "",
+  });
   const [autoApply, setAutoApply] = useState(false);
   const [threshold, setThreshold] = useState(75);
   const [dailyLimit, setDailyLimit] = useState(5);
@@ -206,6 +275,7 @@ export function RoleSignalApp() {
   const displayJobs = liveJobs.length ? liveJobs : sampleJobs;
   const qualifiedJobs = useMemo(() => liveJobs.filter((job) => job.score >= threshold && job.status !== "SKIPPED"), [liveJobs, threshold]);
   const needsAttention = packets.filter((packet) => packet.status === "NEEDS_INPUT").length;
+  const latestRun = searchRuns[0];
 
   useEffect(() => {
     void loadWorkspace();
@@ -224,6 +294,12 @@ export function RoleSignalApp() {
       setLiveJobs(data.jobs || []);
       setPackets(data.packets || []);
       setSources(data.sources || []);
+      setSearchRuns(data.searchRuns || []);
+      setAnswerVault(data.answerVault || []);
+      setAnswerValues((current) => ({
+        ...current,
+        ...Object.fromEntries((data.answerVault || []).map((row) => [row.field_key, row.value])),
+      }));
       if (data.resumes?.[0]) setResumeName(data.resumes[0].filename);
       if (data.preferences) {
         setThreshold(Number(data.preferences.match_threshold ?? 75));
@@ -351,6 +427,56 @@ export function RoleSignalApp() {
     }
   }
 
+  async function runAllSources() {
+    setBusy("scan-all");
+    try {
+      const result = await api<{ run: SearchRun }>("/api/rolesignal/sources/scan-all", { method: "POST" });
+      await loadWorkspace();
+      setView("runs");
+      const staged = result.run.report.autoStaged?.length || 0;
+      setToast(staged ? `Search run completed and ${staged} application kit${staged === 1 ? " was" : "s were"} auto-staged.` : `Search run completed: ${result.run.ready} roles are ready to review.`);
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "The full search run could not finish.");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function disconnectSource(sourceId: string) {
+    setBusy(`source-remove-${sourceId}`);
+    try {
+      await api("/api/rolesignal/sources/remove", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ sourceId }),
+      });
+      await loadWorkspace();
+      setToast("Job source disconnected. Existing scored roles remain in the ledger.");
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "The job source could not be disconnected.");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function saveAnswerVault(event: FormEvent) {
+    event.preventDefault();
+    setBusy("answer-vault");
+    try {
+      const result = await api<{ answerVault: AnswerVaultRow[] }>("/api/rolesignal/answers", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ values: answerValues }),
+      });
+      setAnswerVault(result.answerVault);
+      setToast("Verified answers saved. Future packets can reuse them without guessing.");
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "The answer vault could not be saved.");
+    } finally {
+      setBusy("");
+    }
+  }
+
   async function prepareApplication(job: MatchJob) {
     if (job.isSample) {
       setView("sources");
@@ -401,6 +527,34 @@ export function RoleSignalApp() {
     }
   }
 
+  async function copyApplicationKit(packet: ApplicationPacket) {
+    try {
+      const result = await api<{ kit: ApplicationPacket["kit"] & { company: string; role: string; score: number } }>(`/api/rolesignal/applications/kit?id=${encodeURIComponent(packet.id)}`);
+      const kit = result.kit;
+      if (!kit) throw new Error("Application kit is not ready.");
+      const text = [
+        `# ${kit.company} - ${kit.role}`,
+        `Match score: ${kit.score}/100`,
+        "",
+        "## Application strategy",
+        kit.summary,
+        "",
+        "## Why this role",
+        kit.whyAnswer,
+        "",
+        "## Resume changes",
+        ...(kit.resumeChanges || []).map((item) => `- ${item}`),
+        "",
+        "## Supporting evidence",
+        ...(kit.evidence || []).map((item) => `- ${item}`),
+      ].join("\n");
+      await navigator.clipboard.writeText(text);
+      setToast("Application kit copied as clean Markdown.");
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "The application kit could not be copied.");
+    }
+  }
+
   function openApplication(packet: ApplicationPacket) {
     window.open(packet.applicationUrl, "_blank", "noopener,noreferrer");
   }
@@ -415,7 +569,7 @@ export function RoleSignalApp() {
         <div className="workspace-switcher">
           <span className="workspace-avatar">RK</span>
           <span><strong>{profile.name}</strong><small>{profile.title}</small></span>
-          <b>v2</b>
+          <b>v3</b>
         </div>
         <nav aria-label="Primary navigation">
           <p className="nav-label">Workspace</p>
@@ -423,6 +577,7 @@ export function RoleSignalApp() {
             <button key={item.id} className={view === item.id ? "nav-item active" : "nav-item"} onClick={() => setView(item.id)}>
               <span>{item.mark}</span>{item.label}
               {item.id === "matches" && <b>{liveJobs.length}</b>}
+              {item.id === "runs" && searchRuns.length > 0 && <b>{searchRuns.length}</b>}
               {item.id === "applications" && packets.length > 0 && <b>{packets.length}</b>}
             </button>
           ))}
@@ -445,7 +600,7 @@ export function RoleSignalApp() {
           </select>
           <div className="top-actions">
             <span className="secure-pill"><i /> Evidence-locked</span>
-            <span className="phase-pill">Phase 2</span>
+            <span className="phase-pill">Phase 3</span>
             <button className="avatar-button" aria-label="Career profile">RK</button>
           </div>
         </header>
@@ -458,8 +613,10 @@ export function RoleSignalApp() {
                 <h1>Find work worth applying for.</h1>
                 <p>{liveJobs.length ? `${liveJobs.length} live roles have been scored against verified engineering evidence.` : "Connect a company career board or import a job to replace the curated samples."}</p>
               </div>
-              <button className="primary-button" onClick={() => setView("sources")}><span>+</span> Add job source</button>
+              {sources.length ? <button className="primary-button" disabled={busy === "scan-all"} onClick={() => void runAllSources()}><span>&#8599;</span>{busy === "scan-all" ? "Running search..." : "Run all sources"}</button> : <button className="primary-button" onClick={() => setView("sources")}><span>+</span> Add job source</button>}
             </section>
+
+            {latestRun && <section className="latest-run-strip"><div><span className={`run-status ${latestRun.status.toLowerCase()}`}>{readableStatus(latestRun.status)}</span><span><strong>Latest search run</strong><small>{latestRun.uniqueJobs} unique jobs / {latestRun.ready} ready to review / {postedLabel(latestRun.completedAt || latestRun.startedAt)}</small></span></div><button className="text-button" onClick={() => setView("runs")}>Open run center -&gt;</button></section>}
 
             <section className="metric-grid" aria-label="Job search metrics">
               <Metric label="Live roles" value={String(liveJobs.length)} note={sources.length ? `${sources.length} connected sources` : "Awaiting first source"} trend={liveJobs.length ? "up" : "neutral"} />
@@ -528,7 +685,7 @@ export function RoleSignalApp() {
 
         {view === "sources" && (
           <div className="page inner-page">
-            <PageTitle eyebrow="Live ingestion" title="Bring official jobs into one signal" copy="Scan public Greenhouse and Lever boards, or import a single official job page and full description." />
+            <PageTitle eyebrow="Live ingestion" title="Bring official jobs into one signal" copy="Scan public Greenhouse and Lever boards, or import a single official job page and full description." action={sources.length ? (busy === "scan-all" ? "Running all sources..." : "Run all connected") : undefined} actionDisabled={busy === "scan-all"} onAction={() => void runAllSources()} />
             <div className="source-grid">
               <form className="source-card" onSubmit={scanSource}>
                 <span className="card-kicker">ATS board scan</span><h3>Connect a company board</h3><p>Use the company token from a Greenhouse or Lever careers URL. Public job listings are fetched without application credentials.</p>
@@ -550,7 +707,26 @@ export function RoleSignalApp() {
 
             {scanReport && <section className="run-report"><div><span className="card-kicker">Latest run report</span><h3>{scanReport.source} via {readableStatus(scanReport.provider)}</h3></div><Metric label="Discovered" value={String(scanReport.discovered)} note="Published jobs" trend="neutral" /><Metric label="Unique" value={String(scanReport.unique)} note={`${scanReport.duplicates} duplicates`} trend="up" /><Metric label="Strong" value={String(scanReport.strong)} note="Score 82+" trend="up" /><Metric label="Ready" value={String(scanReport.ready)} note="Score 75+" trend="up" /><Metric label="Skipped" value={String(scanReport.skipped)} note="Reasons retained" trend="neutral" /></section>}
 
-            {sources.length > 0 && <section className="connected-sources"><div className="section-heading"><div><span className="eyebrow">Persistent sources</span><h2>Connected career boards</h2></div></div>{sources.map((source) => <div className="source-row" key={source.id}><span className="source-logo">{source.provider === "greenhouse" ? "GH" : "LV"}</span><span><strong>{source.label}</strong><small>{readableStatus(source.provider)} / {source.source_token}</small></span><b>{source.last_scanned_at ? `Scanned ${postedLabel(source.last_scanned_at)}` : "Ready"}</b></div>)}</section>}
+            {sources.length > 0 && <section className="connected-sources"><div className="section-heading"><div><span className="eyebrow">Persistent sources</span><h2>Connected career boards</h2></div></div>{sources.map((source) => <div className="source-row" key={source.id}><span className="source-logo">{source.provider === "greenhouse" ? "GH" : "LV"}</span><span><strong>{source.label}</strong><small>{readableStatus(source.provider)} / {source.source_token}</small></span><b>{source.last_scanned_at ? `Scanned ${postedLabel(source.last_scanned_at)}` : "Ready"}</b><button className="text-button" disabled={busy === `source-remove-${source.id}`} onClick={() => void disconnectSource(source.id)}>Disconnect</button></div>)}</section>}
+          </div>
+        )}
+
+        {view === "runs" && (
+          <div className="page inner-page">
+            <PageTitle eyebrow="Search operations" title="One run. Every connected source." copy="Scan all active boards, deduplicate listings, score the full set and keep a durable report of what deserves attention." action={sources.length ? (busy === "scan-all" ? "Running search..." : "Run all sources") : "Connect a source"} actionDisabled={busy === "scan-all"} onAction={() => sources.length ? void runAllSources() : setView("sources")} />
+            {!latestRun ? <EmptyState title="No full search run yet" copy="Connect a public Greenhouse or Lever board, then run the complete search workflow from here." action={sources.length ? "Run all sources" : "Connect a source"} onAction={() => sources.length ? void runAllSources() : setView("sources")} /> : <>
+              <section className="run-hero-card">
+                <div className="run-hero-heading"><div><span className="card-kicker">Latest run / {postedLabel(latestRun.completedAt || latestRun.startedAt)}</span><h2>{latestRun.ready} roles ready for deliberate review</h2><p>{latestRun.sourceCount} sources scanned. Duplicates, hard filters and scoring decisions are retained in the report.{latestRun.report.autoStaged?.length ? ` ${latestRun.report.autoStaged.length} qualified application kit${latestRun.report.autoStaged.length === 1 ? " was" : "s were"} staged for review.` : ""}</p></div><span className={`run-status ${latestRun.status.toLowerCase()}`}>{readableStatus(latestRun.status)}</span></div>
+                <div className="run-summary-grid"><Metric label="Discovered" value={String(latestRun.jobsDiscovered)} note={`${latestRun.uniqueJobs} unique`} trend="neutral" /><Metric label="Analyzed" value={String(latestRun.analyzed)} note="Evidence scored" trend="up" /><Metric label="Exceptional" value={String(latestRun.exceptional)} note="Score 90+" trend="up" /><Metric label="Strong" value={String(latestRun.strong)} note="Score 82-89" trend="up" /><Metric label="Needs input" value={String(latestRun.needsInput)} note="Approval blocked" trend={latestRun.needsInput ? "warn" : "up"} /></div>
+                <div className="run-actions"><a className="secondary-button" href={`/api/rolesignal/export/run.md?id=${encodeURIComponent(latestRun.id)}`} download>Download run report</a><button className="primary-button" onClick={() => setView("matches")}>Review all matches</button></div>
+              </section>
+
+              <section className="priority-section"><div className="section-heading"><div><span className="eyebrow">Highest priority</span><h2>The three applications worth focusing on</h2></div></div><div className="priority-grid">{(latestRun.report.highestPriority || []).map((job, index) => <article className="priority-card" key={job.id}><span className="priority-number">0{index + 1}</span><span className="card-kicker">{job.company}</span><h3>{job.role}</h3><p>{job.location} / {job.workMode}</p><div className="priority-score"><strong>{job.score}</strong><span>match<br />score</span></div><button className="text-button" onClick={() => void prepareApplication(job)}>Prepare application -&gt;</button></article>)}</div></section>
+
+              {latestRun.report.failures?.length ? <section className="run-issues"><span className="card-kicker">Source issues retained</span>{latestRun.report.failures.map((failure) => <div key={`${failure.source}-${failure.message}`}><strong>{failure.source}</strong><span>{failure.message}</span></div>)}</section> : null}
+
+              <section className="run-history"><div className="section-heading"><div><span className="eyebrow">Run history</span><h2>Every search, traceable</h2></div></div>{searchRuns.map((run) => <div className="run-row" key={run.id}><span className={`run-status ${run.status.toLowerCase()}`}>{readableStatus(run.status)}</span><span><strong>{postedLabel(run.completedAt || run.startedAt)}</strong><small>{run.sourceCount} sources / {run.jobsDiscovered} discovered / {run.uniqueJobs} unique</small></span><span><b>{run.ready}</b><small>ready</small></span><a href={`/api/rolesignal/export/run.md?id=${encodeURIComponent(run.id)}`} download>Report</a></div>)}</section>
+            </>}
           </div>
         )}
 
@@ -578,12 +754,13 @@ export function RoleSignalApp() {
 
         {view === "applications" && (
           <div className="page inner-page">
-            <PageTitle eyebrow="Application ledger" title="Prepared, blocked and approved" copy="Every state change remains traceable. Approval means browser fill is allowed; final submission remains your action." />
+            <PageTitle eyebrow="Application ledger" title="Prepared, blocked and approved" copy="Every state change remains traceable. Approval means browser fill is allowed; final submission remains your action." action="Export ledger" onAction={() => { window.location.href = "/api/rolesignal/export/ledger.csv"; }} />
             {!packets.length ? <EmptyState title="No application packets yet" copy="Prepare a qualified live match to generate resume guidance and a browser-safe field packet." action="Review matches" onAction={() => setView("matches")} /> : <div className="packet-stack">{packets.map((packet) => <article className="packet-card" key={packet.id}>
               <div className="packet-main"><div><span className="card-kicker">{packet.company}</span><h3>{packet.role}</h3><p><b>{packet.score}/100</b> match / Resume: {packet.resumeStrategy.fit || "DEFAULT"}</p></div><span className={`packet-status ${packet.status.toLowerCase()}`}>{readableStatus(packet.status)}</span></div>
+              {packet.kit && <div className="kit-box"><div><span className="card-kicker">Reusable application kit</span><p>{packet.kit.summary}</p></div><div className="kit-answer"><strong>Why this role</strong><p>{packet.kit.whyAnswer}</p></div></div>}
               {packet.resumeStrategy.changes?.length ? <div className="packet-guidance"><strong>Recommended evidence order</strong><ul>{packet.resumeStrategy.changes.map((change) => <li key={change}>{change}</li>)}</ul></div> : null}
               {packet.blockers.length > 0 && <div className="blocker-box"><strong>Needs your input</strong>{packet.blockers.map((blocker) => <span key={blocker.id}>{blocker.question}</span>)}</div>}
-              <div className="packet-actions"><button className="secondary-button" onClick={() => void copyBrowserPacket(packet)}>Copy browser packet</button><button className="secondary-button" onClick={() => openApplication(packet)}>Open application</button><button className="primary-button" disabled={packet.blockers.length > 0 || packet.status === "APPROVED_FOR_FILL" || busy === `approve-${packet.id}`} onClick={() => void approvePacket(packet)}>{packet.status === "APPROVED_FOR_FILL" ? "Approved for fill" : "Approve for fill"}</button></div>
+              <div className="packet-actions">{packet.kit && <button className="secondary-button" onClick={() => void copyApplicationKit(packet)}>Copy application kit</button>}<button className="secondary-button" onClick={() => void copyBrowserPacket(packet)}>Copy browser packet</button><button className="secondary-button" onClick={() => openApplication(packet)}>Open application</button><button className="primary-button" disabled={packet.blockers.length > 0 || packet.status === "APPROVED_FOR_FILL" || busy === `approve-${packet.id}`} onClick={() => void approvePacket(packet)}>{packet.status === "APPROVED_FOR_FILL" ? "Approved for fill" : "Approve for fill"}</button></div>
             </article>)}</div>}
           </div>
         )}
@@ -596,6 +773,7 @@ export function RoleSignalApp() {
               <ResumePanel resumeName={resumeName} state={uploadState} onChoose={() => fileInput.current?.click()} />
               <section className="profile-card wide-card"><div className="card-heading"><span className="card-kicker">Extracted evidence</span><span className="quiet-label">{profile.source === "resume" ? "Resume-derived" : "Verified brief"}</span></div><div className="evidence-list">{profile.evidence.slice(0, 6).map((item) => <p key={item}>{item}</p>)}</div></section>
               <section className="profile-card wide-card"><span className="card-kicker">Verified skills</span><div className="skill-cloud">{profile.skills.slice(0, 24).map((skill) => <span key={skill}>{skill}<i>✓</i></span>)}</div></section>
+              <form className="profile-card wide-card answer-vault-card" onSubmit={saveAnswerVault}><div className="card-heading"><div><span className="card-kicker">Verified answer vault</span><h3>Facts safe to reuse</h3></div><span className="quiet-label">{answerVault.length}/9 saved</span></div><p>Store recurring form answers once. RoleSignal can fill only these verified values; sensitive or missing judgments still pause for you.</p><div className="vault-grid">{answerFields.map((field) => <label className="vault-field" key={field.key}><span>{field.label}{field.sensitive && <i className="sensitive-tag">Sensitive</i>}</span><input type={field.key === "phone" ? "tel" : field.key.endsWith("_url") ? "url" : "text"} value={answerValues[field.key] || ""} placeholder={field.placeholder} onChange={(event) => setAnswerValues({ ...answerValues, [field.key]: event.target.value })} /></label>)}</div><div className="vault-footer"><span>Saved values are private to this signed-in workspace.</span><button className="primary-button" disabled={busy === "answer-vault"}>{busy === "answer-vault" ? "Saving..." : "Save verified answers"}</button></div></form>
               <section className="profile-card paste-card"><span className="card-kicker">Fallback extraction</span><h3>Paste resume text</h3><p>Use this when a scanned PDF contains no selectable text. Nothing is inferred beyond the pasted evidence.</p><textarea rows={9} value={resumeText} onChange={(event) => setResumeText(event.target.value)} placeholder="Paste the complete resume text here..." /><button className="secondary-button wide" disabled={busy === "resume-text"} onClick={() => void analyzePastedResume()}>{busy === "resume-text" ? "Analyzing..." : "Analyze pasted resume"}</button></section>
             </div>
           </div>
@@ -631,8 +809,8 @@ function PreferenceRow({ label, value }: { label: string; value: string }) {
   return <div className="preference-row"><span>{label}</span><strong>{value}</strong></div>;
 }
 
-function PageTitle({ eyebrow, title, copy, action, onAction }: { eyebrow: string; title: string; copy: string; action?: string; onAction?: () => void }) {
-  return <section className="page-title"><div><span className="eyebrow">{eyebrow}</span><h1>{title}</h1><p>{copy}</p></div>{action && <button className="primary-button" onClick={onAction}><span>+</span>{action}</button>}</section>;
+function PageTitle({ eyebrow, title, copy, action, actionDisabled = false, onAction }: { eyebrow: string; title: string; copy: string; action?: string; actionDisabled?: boolean; onAction?: () => void }) {
+  return <section className="page-title"><div><span className="eyebrow">{eyebrow}</span><h1>{title}</h1><p>{copy}</p></div>{action && <button className="primary-button" disabled={actionDisabled} onClick={onAction}><span>+</span>{action}</button>}</section>;
 }
 
 function RuleSlider({ label, value, min, max, onChange, suffix, help }: { label: string; value: number; min: number; max: number; onChange: (value: number) => void; suffix: string; help: string }) {

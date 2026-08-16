@@ -160,6 +160,47 @@ const schemaStatements = [
     detail_json TEXT NOT NULL,
     created_at TEXT NOT NULL
   )`,
+  `CREATE TABLE IF NOT EXISTS answer_vault (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    field_key TEXT NOT NULL,
+    label TEXT NOT NULL,
+    value TEXT NOT NULL,
+    status TEXT NOT NULL,
+    sensitive INTEGER NOT NULL,
+    updated_at TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS search_runs (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    source_count INTEGER NOT NULL,
+    jobs_discovered INTEGER NOT NULL,
+    unique_jobs INTEGER NOT NULL,
+    analyzed INTEGER NOT NULL,
+    exceptional INTEGER NOT NULL,
+    strong INTEGER NOT NULL,
+    ready INTEGER NOT NULL,
+    needs_input INTEGER NOT NULL,
+    skipped INTEGER NOT NULL,
+    report_json TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    completed_at TEXT
+  )`,
+  `CREATE TABLE IF NOT EXISTS application_kits (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    job_id TEXT NOT NULL,
+    packet_id TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    why_answer TEXT NOT NULL,
+    resume_changes_json TEXT NOT NULL,
+    evidence_json TEXT NOT NULL,
+    form_answers_json TEXT NOT NULL,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`,
   `CREATE INDEX IF NOT EXISTS idx_resumes_user_id ON resumes(user_id)`,
   `CREATE INDEX IF NOT EXISTS idx_jobs_match_score ON jobs(match_score DESC)`,
   `CREATE INDEX IF NOT EXISTS idx_applications_user_status ON applications(user_id, status)`,
@@ -170,6 +211,10 @@ const schemaStatements = [
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_application_packets_user_job ON application_packets(user_id, job_id)`,
   `CREATE INDEX IF NOT EXISTS idx_application_packets_user_status ON application_packets(user_id, status)`,
   `CREATE INDEX IF NOT EXISTS idx_application_events_packet ON application_events(packet_id)`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_answer_vault_user_field ON answer_vault(user_id, field_key)`,
+  `CREATE INDEX IF NOT EXISTS idx_search_runs_user_completed ON search_runs(user_id, completed_at DESC)`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_application_kits_user_job ON application_kits(user_id, job_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_application_kits_packet ON application_kits(packet_id)`,
 ] as const;
 
 async function ensureSchema(env: Env) {
@@ -226,7 +271,7 @@ function rowToJob(row: Record<string, unknown>) {
 }
 
 function rowToPacket(row: Record<string, unknown>) {
-  return {
+  const packet = {
     id: row.id,
     jobId: row.job_id,
     status: row.status,
@@ -240,6 +285,123 @@ function rowToPacket(row: Record<string, unknown>) {
     applicationUrl: row.application_url,
     score: row.match_score,
   };
+  if (!row.kit_id) return packet;
+  return {
+    ...packet,
+    kit: {
+      id: row.kit_id,
+      summary: row.kit_summary,
+      whyAnswer: row.kit_why_answer,
+      resumeChanges: parseJson(row.kit_resume_changes_json, []),
+      evidence: parseJson(row.kit_evidence_json, []),
+      formAnswers: parseJson(row.kit_form_answers_json, {}),
+      status: row.kit_status,
+    },
+  };
+}
+
+function rowToRun(row: Record<string, unknown>) {
+  return {
+    id: row.id,
+    status: row.status,
+    sourceCount: row.source_count,
+    jobsDiscovered: row.jobs_discovered,
+    uniqueJobs: row.unique_jobs,
+    analyzed: row.analyzed,
+    exceptional: row.exceptional,
+    strong: row.strong,
+    ready: row.ready,
+    needsInput: row.needs_input,
+    skipped: row.skipped,
+    report: parseJson(row.report_json, {}),
+    startedAt: row.started_at,
+    completedAt: row.completed_at,
+  };
+}
+
+const answerDefinitions = {
+  phone: { label: "Phone number", sensitive: true },
+  linkedin_url: { label: "LinkedIn URL", sensitive: false },
+  github_url: { label: "GitHub URL", sensitive: false },
+  current_location: { label: "Current location", sensitive: false },
+  notice_period: { label: "Notice period", sensitive: true },
+  current_compensation: { label: "Current compensation", sensitive: true },
+  expected_compensation: { label: "Expected compensation", sensitive: true },
+  work_authorization: { label: "Work authorization", sensitive: true },
+  relocation: { label: "Relocation preference", sensitive: true },
+} as const;
+
+type AnswerKey = keyof typeof answerDefinitions;
+
+function answerKeyForQuestion(question: string): AnswerKey | "" {
+  const text = question.toLowerCase();
+  if (/phone|mobile/.test(text)) return "phone";
+  if (/linkedin/.test(text)) return "linkedin_url";
+  if (/github/.test(text)) return "github_url";
+  if (/current location|where.*located/.test(text)) return "current_location";
+  if (/notice period|joining time|available to start/.test(text)) return "notice_period";
+  if (/current (compensation|salary|ctc)/.test(text)) return "current_compensation";
+  if (/expected (compensation|salary|ctc)|salary expectation/.test(text)) return "expected_compensation";
+  if (/authorization|visa|sponsor|legally authorized/.test(text)) return "work_authorization";
+  if (/relocat/.test(text)) return "relocation";
+  return "";
+}
+
+async function answersForUser(env: Env, userId: string) {
+  const result = await env.DB.prepare(
+    "SELECT field_key, label, value, status, sensitive, updated_at FROM answer_vault WHERE user_id = ? ORDER BY field_key",
+  ).bind(userId).all<Record<string, unknown>>();
+  const values: Record<string, string> = {};
+  for (const row of result.results) values[asString(row.field_key)] = asString(row.value);
+  return { rows: result.results, values };
+}
+
+function buildApplicationKit(
+  profile: CandidateProfile,
+  job: Record<string, unknown>,
+  scored: ScoredJob,
+  packetId: string,
+  answers: Record<string, string>,
+) {
+  const evidence = (scored.matchingExperience ?? []).slice(0, 5);
+  const resumeChanges = (scored.resumeChanges ?? []).slice(0, 5);
+  const strongest = evidence.slice(0, 3).join(", ").replace(/, ([^,]*)$/, " and $1");
+  const role = asString(job.role);
+  const company = asString(job.company);
+  const summary = `Use the default resume${scored.resumeFit === "CUSTOMIZE" ? " with targeted evidence ordering" : ""}. Lead with ${strongest || "verified backend delivery and production ownership"}.`;
+  const whyAnswer = `This ${role} role aligns with my production work in ${strongest || "backend systems and reliability"}. At SaaS Labs / JustCall, I have owned systems from architecture through scaling and incident response, and I am interested in applying that same engineering depth to ${company}'s product challenges.`;
+  return {
+    packetId,
+    summary,
+    whyAnswer,
+    resumeChanges,
+    evidence,
+    formAnswers: answers,
+    status: "READY_FOR_REVIEW",
+  };
+}
+
+function selectHighestPriority(jobs: Array<Record<string, unknown>>, limit: number) {
+  const sorted = [...jobs].sort((a, b) => {
+    const aScore = Number(a.match_score) + (parseJson<{ highPriority?: boolean }>(a.score_json, {}).highPriority ? 4 : 0);
+    const bScore = Number(b.match_score) + (parseJson<{ highPriority?: boolean }>(b.score_json, {}).highPriority ? 4 : 0);
+    return bScore - aScore;
+  });
+  const selected: Array<Record<string, unknown>> = [];
+  const companies = new Set<string>();
+  for (const job of sorted) {
+    const company = asString(job.company).toLowerCase();
+    if (companies.has(company)) continue;
+    selected.push(job);
+    companies.add(company);
+    if (selected.length === limit) break;
+  }
+  return selected;
+}
+
+function csvCell(value: unknown) {
+  const text = String(value ?? "").replaceAll('"', '""');
+  return `"${text}"`;
 }
 
 async function profileForUser(env: Env, user: { id: string; email: string; name: string }) {
@@ -316,7 +478,7 @@ async function safeFetch(urlValue: string, accept = "text/html,application/json"
   const timer = setTimeout(() => controller.abort(), 12_000);
   try {
     const response = await fetch(target, {
-      headers: { accept, "user-agent": "RoleSignal/2.0 job-matching assistant" },
+      headers: { accept, "user-agent": "RoleSignal/3.0 job-matching assistant" },
       redirect: "follow",
       signal: controller.signal,
     });
@@ -414,17 +576,6 @@ async function scanSource(
   if (!new Set(["greenhouse", "lever"]).has(provider)) throw new Error("Choose Greenhouse or Lever.");
   if (!/^[a-z0-9][a-z0-9_-]{1,79}$/.test(token)) throw new Error("Enter the company board token from its careers URL.");
 
-  const sourceId = crypto.randomUUID();
-  await env.DB.prepare(
-    `INSERT INTO job_sources (id, user_id, provider, source_token, label, active, last_scanned_at, created_at)
-     VALUES (?, ?, ?, ?, ?, 1, ?, ?)
-     ON CONFLICT(user_id, provider, source_token) DO UPDATE SET
-       label = excluded.label, active = 1, last_scanned_at = excluded.last_scanned_at`,
-  ).bind(sourceId, user.id, provider, token, label, now, now).run();
-  const sourceRow = await env.DB.prepare(
-    "SELECT id FROM job_sources WHERE user_id = ? AND provider = ? AND source_token = ?",
-  ).bind(user.id, provider, token).first<Record<string, unknown>>();
-  const durableSourceId = asString(sourceRow?.id, sourceId);
   const profile = await profileForUser(env, user);
   let inputs: JobInput[] = [];
 
@@ -461,6 +612,17 @@ async function scanSource(
     });
   }
 
+  const sourceId = crypto.randomUUID();
+  await env.DB.prepare(
+    `INSERT INTO job_sources (id, user_id, provider, source_token, label, active, last_scanned_at, created_at)
+     VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+     ON CONFLICT(user_id, provider, source_token) DO UPDATE SET
+       label = excluded.label, active = 1, last_scanned_at = excluded.last_scanned_at`,
+  ).bind(sourceId, user.id, provider, token, label, now, now).run();
+  const sourceRow = await env.DB.prepare(
+    "SELECT id FROM job_sources WHERE user_id = ? AND provider = ? AND source_token = ?",
+  ).bind(user.id, provider, token).first<Record<string, unknown>>();
+  const durableSourceId = asString(sourceRow?.id, sourceId);
   let duplicates = 0;
   const scored: Array<ScoredJob & { id: string }> = [];
   for (const input of inputs) {
@@ -479,6 +641,119 @@ async function scanSource(
     ready: scored.filter((job) => job.score >= 75 && job.status !== "SKIPPED").length,
     skipped: scored.filter((job) => job.status === "SKIPPED").length,
     top: scored.sort((a, b) => b.score - a.score).slice(0, 10),
+  };
+}
+
+async function scanAllSources(
+  env: Env,
+  user: { id: string; email: string; name: string },
+  startedAt: string,
+) {
+  const sourceResult = await env.DB.prepare(
+    "SELECT provider, source_token, label FROM job_sources WHERE user_id = ? AND active = 1 ORDER BY created_at",
+  ).bind(user.id).all<Record<string, unknown>>();
+  if (!sourceResult.results.length) throw new Error("Connect at least one Greenhouse or Lever board before running a full scan.");
+
+  const runId = crypto.randomUUID();
+  await env.DB.prepare(
+    `INSERT INTO search_runs
+     (id, user_id, status, source_count, jobs_discovered, unique_jobs, analyzed,
+      exceptional, strong, ready, needs_input, skipped, report_json, started_at, completed_at)
+     VALUES (?, ?, 'RUNNING', ?, 0, 0, 0, 0, 0, 0, 0, 0, '{}', ?, NULL)`,
+  ).bind(runId, user.id, sourceResult.results.length, startedAt).run();
+
+  const sourceReports: Array<Record<string, unknown>> = [];
+  const failures: Array<{ source: string; message: string }> = [];
+  for (const source of sourceResult.results) {
+    try {
+      sourceReports.push(await scanSource({
+        provider: source.provider,
+        token: source.source_token,
+        label: source.label,
+      }, env, user, new Date().toISOString()));
+    } catch (error) {
+      failures.push({
+        source: asString(source.label, asString(source.source_token)),
+        message: error instanceof Error ? error.message : "Source scan failed",
+      });
+    }
+  }
+
+  const [jobsResult, preferences] = await Promise.all([
+    env.DB.prepare(
+      "SELECT * FROM job_matches WHERE user_id = ? AND updated_at >= ? ORDER BY match_score DESC, updated_at DESC LIMIT 200",
+    ).bind(user.id, startedAt).all<Record<string, unknown>>(),
+    env.DB.prepare(
+      "SELECT auto_apply, daily_limit, match_threshold FROM preferences WHERE user_id = ?",
+    ).bind(user.id).first<Record<string, unknown>>(),
+  ]);
+  const jobs = jobsResult.results;
+  const discovered = sourceReports.reduce((sum, report) => sum + Number(report.discovered ?? 0), 0);
+  const uniqueJobs = sourceReports.reduce((sum, report) => sum + Number(report.unique ?? 0), 0);
+  const exceptional = jobs.filter((job) => Number(job.match_score) >= 90).length;
+  const strong = jobs.filter((job) => Number(job.match_score) >= 82 && Number(job.match_score) < 90).length;
+  const ready = jobs.filter((job) => Number(job.match_score) >= 75 && job.status !== "SKIPPED").length;
+  const skipped = jobs.filter((job) => job.status === "SKIPPED").length;
+  const topRows = jobs.slice(0, 10);
+  const priorityRows = selectHighestPriority(jobs.filter((job) => Number(job.match_score) >= 75 && job.status !== "SKIPPED"), 3);
+  const autoStaged: Array<{ packetId: string; jobId: string; status: string }> = [];
+  const autoStageFailures: Array<{ jobId: string; message: string }> = [];
+  if (Number(preferences?.auto_apply ?? 0) === 1) {
+    const threshold = Math.max(75, Number(preferences?.match_threshold ?? 75));
+    const limit = Math.max(1, Math.min(20, Number(preferences?.daily_limit ?? 5)));
+    const candidates = jobs
+      .filter((job) => Number(job.match_score) >= threshold && job.status !== "SKIPPED")
+      .sort((a, b) => Number(b.match_score) - Number(a.match_score))
+      .slice(0, limit);
+    for (const candidate of candidates) {
+      try {
+        const packet = await prepareApplication({ jobId: candidate.id }, env, user, new Date().toISOString());
+        autoStaged.push({ packetId: packet.id, jobId: asString(candidate.id), status: packet.status });
+      } catch (error) {
+        autoStageFailures.push({
+          jobId: asString(candidate.id),
+          message: error instanceof Error ? error.message : "Application staging failed",
+        });
+      }
+    }
+  }
+  const needsInputRow = await env.DB.prepare(
+    "SELECT COUNT(*) AS count FROM application_packets WHERE user_id = ? AND status = 'NEEDS_INPUT'",
+  ).bind(user.id).first<Record<string, unknown>>();
+  const report = {
+    sourceReports,
+    failures,
+    topOpportunities: topRows.map(rowToJob),
+    highestPriority: priorityRows.map(rowToJob),
+    autoStaged,
+    autoStageFailures,
+  };
+  const completedAt = new Date().toISOString();
+  const status = failures.length === sourceResult.results.length ? "FAILED" : failures.length ? "PARTIAL" : "COMPLETED";
+  await env.DB.prepare(
+    `UPDATE search_runs SET
+       status = ?, jobs_discovered = ?, unique_jobs = ?, analyzed = ?, exceptional = ?,
+       strong = ?, ready = ?, needs_input = ?, skipped = ?, report_json = ?, completed_at = ?
+     WHERE id = ? AND user_id = ?`,
+  ).bind(
+    status, discovered, uniqueJobs, jobs.length, exceptional, strong, ready,
+    Number(needsInputRow?.count ?? 0), skipped, JSON.stringify(report), completedAt, runId, user.id,
+  ).run();
+  return {
+    id: runId,
+    status,
+    sourceCount: sourceResult.results.length,
+    jobsDiscovered: discovered,
+    uniqueJobs,
+    analyzed: jobs.length,
+    exceptional,
+    strong,
+    ready,
+    needsInput: Number(needsInputRow?.count ?? 0),
+    skipped,
+    report,
+    startedAt,
+    completedAt,
   };
 }
 
@@ -524,15 +799,22 @@ async function prepareApplication(
   const scored = parseJson<ScoredJob>(job.score_json, {} as ScoredJob);
   const questions = Array.isArray(body.requiredQuestions) ? body.requiredQuestions.map((item) => asString(item)).filter(Boolean) : [];
   const unknownPattern = /compensation|salary|ctc|notice period|authorization|visa|sponsor|relocat|demographic|gender|disability|veteran|legal|criminal/i;
-  const blockers = questions.filter((question) => unknownPattern.test(question)).map((question) => ({
-    id: crypto.randomUUID(), question, status: "NEEDS_INPUT",
-  }));
+  const vault = await answersForUser(env, user.id);
+  const blockers = questions
+    .filter((question) => {
+      const key = answerKeyForQuestion(question);
+      return unknownPattern.test(question) && (!key || !vault.values[key]);
+    })
+    .map((question) => ({
+      id: answerKeyForQuestion(question) || crypto.randomUUID(), question, status: "NEEDS_INPUT",
+    }));
   const profile = await profileForUser(env, user);
   const answers = {
     full_name: profile.name,
     email: profile.email,
     current_company: "SaaS Labs / JustCall",
     current_title: profile.title,
+    ...vault.values,
   };
   const resumeStrategy = {
     fit: scored.resumeFit ?? "DEFAULT",
@@ -555,10 +837,50 @@ async function prepareApplication(
   const saved = await env.DB.prepare(
     "SELECT * FROM application_packets WHERE user_id = ? AND job_id = ?",
   ).bind(user.id, jobId).first<Record<string, unknown>>();
+  const kit = buildApplicationKit(profile, job, scored, asString(saved?.id), answers);
+  const kitId = crypto.randomUUID();
+  await env.DB.prepare(
+    `INSERT INTO application_kits
+     (id, user_id, job_id, packet_id, summary, why_answer, resume_changes_json,
+      evidence_json, form_answers_json, status, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(user_id, job_id) DO UPDATE SET
+       packet_id = excluded.packet_id,
+       summary = excluded.summary,
+       why_answer = excluded.why_answer,
+       resume_changes_json = excluded.resume_changes_json,
+       evidence_json = excluded.evidence_json,
+       form_answers_json = excluded.form_answers_json,
+       status = excluded.status,
+       updated_at = excluded.updated_at`,
+  ).bind(
+    kitId, user.id, jobId, saved?.id, kit.summary, kit.whyAnswer,
+    JSON.stringify(kit.resumeChanges), JSON.stringify(kit.evidence),
+    JSON.stringify(kit.formAnswers), kit.status, now, now,
+  ).run();
+  const savedKit = await env.DB.prepare(
+    "SELECT * FROM application_kits WHERE user_id = ? AND job_id = ?",
+  ).bind(user.id, jobId).first<Record<string, unknown>>();
   await env.DB.prepare(
     "INSERT INTO application_events (id, packet_id, user_id, event_type, detail_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
   ).bind(crypto.randomUUID(), saved?.id, user.id, "PREPARED", JSON.stringify({ score: job.match_score, blockers: blockers.length }), now).run();
-  return { ...rowToPacket({ ...saved, company: job.company, role: job.role, application_url: job.application_url, match_score: job.match_score }), browserPacket: buildBrowserPacket(profile, job, saved ?? {}) };
+  return {
+    ...rowToPacket({
+      ...saved,
+      company: job.company,
+      role: job.role,
+      application_url: job.application_url,
+      match_score: job.match_score,
+      kit_id: savedKit?.id,
+      kit_summary: savedKit?.summary,
+      kit_why_answer: savedKit?.why_answer,
+      kit_resume_changes_json: savedKit?.resume_changes_json,
+      kit_evidence_json: savedKit?.evidence_json,
+      kit_form_answers_json: savedKit?.form_answers_json,
+      kit_status: savedKit?.status,
+    }),
+    browserPacket: buildBrowserPacket(profile, job, saved ?? {}),
+  };
 }
 
 async function handleRoleSignalApi(request: Request, env: Env, url: URL) {
@@ -574,7 +896,7 @@ async function handleRoleSignalApi(request: Request, env: Env, url: URL) {
     ).bind(user.id, user.email, user.name, now).run();
 
     if (url.pathname === "/api/rolesignal/workspace" && request.method === "GET") {
-      const [resumes, preferences, profile, matches, sources, packets] = await Promise.all([
+      const [resumes, preferences, profile, matches, sources, packets, vault, runs] = await Promise.all([
         env.DB.prepare(
           `SELECT id, filename, content_type, size_bytes, status, created_at
            FROM resumes WHERE user_id = ? ORDER BY created_at DESC LIMIT 10`,
@@ -582,11 +904,21 @@ async function handleRoleSignalApi(request: Request, env: Env, url: URL) {
         env.DB.prepare("SELECT * FROM preferences WHERE user_id = ?").bind(user.id).first(),
         profileForUser(env, user),
         env.DB.prepare("SELECT * FROM job_matches WHERE user_id = ? ORDER BY match_score DESC, updated_at DESC LIMIT 200").bind(user.id).all(),
-        env.DB.prepare("SELECT * FROM job_sources WHERE user_id = ? ORDER BY created_at DESC").bind(user.id).all(),
+        env.DB.prepare("SELECT * FROM job_sources WHERE user_id = ? AND active = 1 ORDER BY created_at DESC").bind(user.id).all(),
         env.DB.prepare(
-          `SELECT p.*, j.company, j.role, j.application_url, j.match_score
+          `SELECT p.*, j.company, j.role, j.application_url, j.match_score,
+                  k.id AS kit_id, k.summary AS kit_summary, k.why_answer AS kit_why_answer,
+                  k.resume_changes_json AS kit_resume_changes_json,
+                  k.evidence_json AS kit_evidence_json,
+                  k.form_answers_json AS kit_form_answers_json,
+                  k.status AS kit_status
            FROM application_packets p JOIN job_matches j ON j.id = p.job_id
+           LEFT JOIN application_kits k ON k.user_id = p.user_id AND k.job_id = p.job_id
            WHERE p.user_id = ? ORDER BY p.updated_at DESC`,
+        ).bind(user.id).all(),
+        answersForUser(env, user.id),
+        env.DB.prepare(
+          "SELECT * FROM search_runs WHERE user_id = ? ORDER BY completed_at DESC, started_at DESC LIMIT 20",
         ).bind(user.id).all(),
       ]);
       return json({
@@ -597,6 +929,8 @@ async function handleRoleSignalApi(request: Request, env: Env, url: URL) {
         jobs: (matches.results as Record<string, unknown>[]).map(rowToJob),
         sources: sources.results,
         packets: (packets.results as Record<string, unknown>[]).map(rowToPacket),
+        answerVault: vault.rows,
+        searchRuns: (runs.results as Record<string, unknown>[]).map(rowToRun),
       });
     }
 
@@ -684,6 +1018,33 @@ async function handleRoleSignalApi(request: Request, env: Env, url: URL) {
       return json({ saved: true, matchThreshold: threshold, dailyLimit, autoApply });
     }
 
+    if (url.pathname === "/api/rolesignal/answers" && request.method === "POST") {
+      const body = await request.json() as Record<string, unknown>;
+      const values = typeof body.values === "object" && body.values ? body.values as Record<string, unknown> : {};
+      const statements: ReturnType<D1Database["prepare"]>[] = [];
+      for (const [fieldKey, definition] of Object.entries(answerDefinitions)) {
+        if (!(fieldKey in values)) continue;
+        const value = asString(values[fieldKey]).slice(0, 500);
+        if (!value) {
+          statements.push(env.DB.prepare("DELETE FROM answer_vault WHERE user_id = ? AND field_key = ?").bind(user.id, fieldKey));
+          continue;
+        }
+        statements.push(env.DB.prepare(
+          `INSERT INTO answer_vault (id, user_id, field_key, label, value, status, sensitive, updated_at)
+           VALUES (?, ?, ?, ?, ?, 'VERIFIED', ?, ?)
+           ON CONFLICT(user_id, field_key) DO UPDATE SET
+             label = excluded.label,
+             value = excluded.value,
+             status = 'VERIFIED',
+             sensitive = excluded.sensitive,
+             updated_at = excluded.updated_at`,
+        ).bind(crypto.randomUUID(), user.id, fieldKey, definition.label, value, definition.sensitive ? 1 : 0, now));
+      }
+      if (!statements.length) return json({ error: "No recognized answer fields were provided." }, 400);
+      await env.DB.batch(statements);
+      return json({ saved: true, answerVault: (await answersForUser(env, user.id)).rows });
+    }
+
     if (url.pathname === "/api/rolesignal/jobs/import" && request.method === "POST") {
       const body = await request.json() as Record<string, unknown>;
       return json({ job: await importSingleJob(body, env, user, now) }, 201);
@@ -692,6 +1053,21 @@ async function handleRoleSignalApi(request: Request, env: Env, url: URL) {
     if (url.pathname === "/api/rolesignal/sources/scan" && request.method === "POST") {
       const body = await request.json() as Record<string, unknown>;
       return json({ report: await scanSource(body, env, user, now) }, 201);
+    }
+
+    if (url.pathname === "/api/rolesignal/sources/scan-all" && request.method === "POST") {
+      return json({ run: await scanAllSources(env, user, now) }, 201);
+    }
+
+    if (url.pathname === "/api/rolesignal/sources/remove" && request.method === "POST") {
+      const body = await request.json() as Record<string, unknown>;
+      const sourceId = asString(body.sourceId);
+      if (!sourceId) return json({ error: "Source id is required." }, 400);
+      const result = await env.DB.prepare(
+        "UPDATE job_sources SET active = 0 WHERE id = ? AND user_id = ?",
+      ).bind(sourceId, user.id).run();
+      if (!result.meta.changes) return json({ error: "Job source not found." }, 404);
+      return json({ removed: true, sourceId });
     }
 
     if (url.pathname === "/api/rolesignal/applications/prepare" && request.method === "POST") {
@@ -727,6 +1103,7 @@ async function handleRoleSignalApi(request: Request, env: Env, url: URL) {
       if (blockers.length) return json({ error: "Resolve every required answer before approval.", blockers }, 409);
       await env.DB.batch([
         env.DB.prepare("UPDATE application_packets SET status = 'APPROVED_FOR_FILL', updated_at = ? WHERE id = ? AND user_id = ?").bind(now, packetId, user.id),
+        env.DB.prepare("UPDATE application_kits SET status = 'APPROVED_FOR_FILL', updated_at = ? WHERE packet_id = ? AND user_id = ?").bind(now, packetId, user.id),
         env.DB.prepare("INSERT INTO application_events (id, packet_id, user_id, event_type, detail_json, created_at) VALUES (?, ?, ?, 'APPROVED_FOR_FILL', '{}', ?)").bind(crypto.randomUUID(), packetId, user.id, now),
       ]);
       return json({ approved: true, status: "APPROVED_FOR_FILL" });
@@ -738,7 +1115,102 @@ async function handleRoleSignalApi(request: Request, env: Env, url: URL) {
       if (!packet) return json({ error: "Application packet not found." }, 404);
       const job = await env.DB.prepare("SELECT * FROM job_matches WHERE id = ? AND user_id = ?").bind(packet.job_id, user.id).first<Record<string, unknown>>();
       if (!job) return json({ error: "Job not found." }, 404);
-      return json({ packet: buildBrowserPacket(await profileForUser(env, user), job, packet) });
+      const vault = await answersForUser(env, user.id);
+      const hydratedPacket = {
+        ...packet,
+        answers_json: JSON.stringify({ ...parseJson(packet.answers_json, {}), ...vault.values }),
+      };
+      return json({ packet: buildBrowserPacket(await profileForUser(env, user), job, hydratedPacket) });
+    }
+
+    if (url.pathname === "/api/rolesignal/applications/kit" && request.method === "GET") {
+      const packetId = url.searchParams.get("id") ?? "";
+      const kit = await env.DB.prepare(
+        `SELECT k.*, j.company, j.role, j.location, j.application_url, j.match_score
+         FROM application_kits k JOIN job_matches j ON j.id = k.job_id
+         WHERE k.packet_id = ? AND k.user_id = ?`,
+      ).bind(packetId, user.id).first<Record<string, unknown>>();
+      if (!kit) return json({ error: "Application kit not found." }, 404);
+      return json({
+        kit: {
+          id: kit.id,
+          company: kit.company,
+          role: kit.role,
+          location: kit.location,
+          applicationUrl: kit.application_url,
+          score: kit.match_score,
+          summary: kit.summary,
+          whyAnswer: kit.why_answer,
+          resumeChanges: parseJson(kit.resume_changes_json, []),
+          evidence: parseJson(kit.evidence_json, []),
+          formAnswers: parseJson(kit.form_answers_json, {}),
+          status: kit.status,
+        },
+      });
+    }
+
+    if (url.pathname === "/api/rolesignal/export/ledger.csv" && request.method === "GET") {
+      const result = await env.DB.prepare(
+        `SELECT j.match_score, j.company, j.role, j.location, j.posted_date, j.platform,
+                CASE WHEN p.status IS NULL THEN j.status ELSE p.status END AS ledger_status,
+                j.application_url
+         FROM job_matches j
+         LEFT JOIN application_packets p ON p.user_id = j.user_id AND p.job_id = j.id
+         WHERE j.user_id = ?
+         ORDER BY j.match_score DESC, j.updated_at DESC`,
+      ).bind(user.id).all<Record<string, unknown>>();
+      const header = ["Score", "Company", "Role", "Location", "Posted", "Platform", "Status", "URL"];
+      const rows = result.results.map((row) => [
+        row.match_score, row.company, row.role, row.location, row.posted_date,
+        row.platform, row.ledger_status, row.application_url,
+      ]);
+      const csv = [header, ...rows].map((row) => row.map(csvCell).join(",")).join("\r\n");
+      return new Response(csv, {
+        headers: {
+          "content-type": "text/csv; charset=utf-8",
+          "content-disposition": `attachment; filename="rolesignal-ledger-${now.slice(0, 10)}.csv"`,
+          "cache-control": "no-store",
+        },
+      });
+    }
+
+    if (url.pathname === "/api/rolesignal/export/run.md" && request.method === "GET") {
+      const runId = url.searchParams.get("id") ?? "";
+      const row = await env.DB.prepare("SELECT * FROM search_runs WHERE id = ? AND user_id = ?").bind(runId, user.id).first<Record<string, unknown>>();
+      if (!row) return json({ error: "Search run not found." }, 404);
+      const run = rowToRun(row);
+      const report = run.report as { topOpportunities?: Array<Record<string, unknown>>; highestPriority?: Array<Record<string, unknown>>; failures?: Array<Record<string, unknown>>; autoStaged?: Array<Record<string, unknown>> };
+      const jobLines = (jobs: Array<Record<string, unknown>> = []) => jobs.map((job, index) => `${index + 1}. **${job.company} — ${job.role}** (${job.score}/100)\n   ${job.location} · ${job.platform} · ${job.applicationUrl}`).join("\n");
+      const markdown = [
+        "# RoleSignal Search Run",
+        `Completed: ${run.completedAt ?? run.startedAt}`,
+        "",
+        "## Application Summary",
+        `- Jobs discovered: ${run.jobsDiscovered}`,
+        `- Unique jobs: ${run.uniqueJobs}`,
+        `- Jobs analyzed: ${run.analyzed}`,
+        `- Exceptional matches: ${run.exceptional}`,
+        `- Strong matches: ${run.strong}`,
+        `- Ready to review: ${run.ready}`,
+        `- Needs input: ${run.needsInput}`,
+        `- Skipped: ${run.skipped}`,
+        `- Application kits auto-staged: ${report.autoStaged?.length ?? 0}`,
+        "",
+        "## Highest Priority",
+        jobLines(report.highestPriority),
+        "",
+        "## Top Opportunities",
+        jobLines(report.topOpportunities),
+        "",
+        report.failures?.length ? `## Source Issues\n${report.failures.map((failure) => `- ${failure.source}: ${failure.message}`).join("\n")}` : "",
+      ].filter(Boolean).join("\n");
+      return new Response(markdown, {
+        headers: {
+          "content-type": "text/markdown; charset=utf-8",
+          "content-disposition": `attachment; filename="rolesignal-run-${runId.slice(0, 8)}.md"`,
+          "cache-control": "no-store",
+        },
+      });
     }
 
     return json({ error: "Not found" }, 404);
