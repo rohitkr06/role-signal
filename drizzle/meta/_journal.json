@@ -43,6 +43,13 @@
       "when": 1786986430167,
       "tag": "0005_nifty_malice",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1786990312187,
+      "tag": "0006_phase7_execution",
+      "breakpoints": true
     }
   ]
 }

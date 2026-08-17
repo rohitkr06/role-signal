@@ -8,8 +8,8 @@
   </head>
   <body>
     <main>
-      <header><span class="mark"><i></i></span><div><strong>RoleSignal</strong><small>Discovery + approval-first browser fill</small></div></header>
-      <nav class="tabs"><button class="active" data-panel="discover">Discover</button><button data-panel="apply">Apply</button></nav>
+      <header><span class="mark"><i></i></span><div><strong>RoleSignal</strong><small>Discovery + Phase 7 execution</small></div></header>
+      <nav class="tabs"><button class="active" data-panel="discover">Discover</button><button data-panel="apply">Apply</button><button data-panel="autopilot">Autopilot</button></nav>
       <section id="discover" class="panel active">
         <div class="intro"><strong>Capture visible jobs</strong><span>Use this on LinkedIn, Naukri, Workday, Indeed, Wellfound, Cutshort, Instahyre, Hirist, Foundit, YC Jobs, or a company results page.</span></div>
         <button id="capture">Capture visible jobs</button>
@@ -22,6 +22,14 @@
         <p id="job" class="job"></p>
         <button id="stage">Stage supported fields</button>
         <button id="open" class="quiet">Open application page</button>
+      </section>
+      <section id="autopilot" class="panel">
+        <div class="intro"><strong>Connected execution queue</strong><span>Keep Chrome open and signed in. RoleSignal pauses for CAPTCHA, missing required answers, or unsupported submission flows.</span></div>
+        <label>RoleSignal URL<input id="site-url" type="url" value="https://rolesignal-rohit.rohitk61299.chatgpt.site" /></label>
+        <label>Connection key<input id="connection-key" type="password" placeholder="rs_live_..." /></label>
+        <label class="toggle-row"><span><strong>Run approved queue</strong><small>Checks once per minute</small></span><input id="autopilot-enabled" type="checkbox" /></label>
+        <button id="save-autopilot">Save connection</button>
+        <button id="run-next" class="quiet">Run next application now</button>
       </section>
       <p id="status" role="status">Capture reads only visible job cards. Final submission is never automated.</p>
     </main>

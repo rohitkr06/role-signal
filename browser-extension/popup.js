@@ -2,22 +2,30 @@ const packetInput = document.querySelector("#packet");
 const status = document.querySelector("#status");
 const job = document.querySelector("#job");
 const capturedInput = document.querySelector("#captured");
+const siteUrlInput = document.querySelector("#site-url");
+const connectionKeyInput = document.querySelector("#connection-key");
+const autopilotEnabledInput = document.querySelector("#autopilot-enabled");
 
 document.querySelectorAll(".tabs button").forEach((button) => button.addEventListener("click", () => {
   document.querySelectorAll(".tabs button").forEach((item) => item.classList.toggle("active", item === button));
   document.querySelectorAll(".panel").forEach((panel) => panel.classList.toggle("active", panel.id === button.dataset.panel));
   status.className = "";
   status.textContent = button.dataset.panel === "discover"
-    ? "Capture reads only visible job cards. Final submission is never automated."
-    : "Verified answer-vault fields can be staged. Final submission is never automated.";
+    ? "Capture reads only visible job cards."
+    : button.dataset.panel === "apply"
+      ? "Verified answer-vault fields can be staged for a manual review."
+      : "Only approved queue items run. CAPTCHA and unknown required fields always pause.";
 }));
 
-chrome.storage.local.get(["rolesignalPacket", "rolesignalCapture"]).then(({ rolesignalPacket, rolesignalCapture }) => {
+chrome.storage.local.get(["rolesignalPacket", "rolesignalCapture", "rolesignalSiteUrl", "rolesignalConnectionKey", "rolesignalAutopilotEnabled"]).then(({ rolesignalPacket, rolesignalCapture, rolesignalSiteUrl, rolesignalConnectionKey, rolesignalAutopilotEnabled }) => {
   if (rolesignalPacket) {
     packetInput.value = JSON.stringify(rolesignalPacket, null, 2);
     showJob(rolesignalPacket);
   }
   if (rolesignalCapture) capturedInput.value = JSON.stringify(rolesignalCapture, null, 2);
+  if (rolesignalSiteUrl) siteUrlInput.value = rolesignalSiteUrl;
+  if (rolesignalConnectionKey) connectionKeyInput.value = rolesignalConnectionKey;
+  autopilotEnabledInput.checked = Boolean(rolesignalAutopilotEnabled);
 });
 
 packetInput.addEventListener("input", () => {
@@ -87,12 +95,39 @@ document.querySelector("#copy-capture").addEventListener("click", async () => {
   }
 });
 
+document.querySelector("#save-autopilot").addEventListener("click", async () => {
+  try {
+    const siteUrl = new URL(siteUrlInput.value);
+    if (siteUrl.protocol !== "https:" && siteUrl.hostname !== "localhost") throw new Error("Use the secure RoleSignal URL.");
+    const key = connectionKeyInput.value.trim();
+    if (!key.startsWith("rs_live_")) throw new Error("Paste a connection key generated in Phase 7.");
+    await chrome.storage.local.set({
+      rolesignalSiteUrl: siteUrl.origin,
+      rolesignalConnectionKey: key,
+      rolesignalAutopilotEnabled: autopilotEnabledInput.checked,
+    });
+    status.className = "";
+    status.textContent = autopilotEnabledInput.checked ? "Connected. Approved applications will be checked once per minute." : "Connection saved. Autopilot remains paused.";
+  } catch (error) {
+    status.className = "warn";
+    status.textContent = error instanceof Error ? error.message : "The connection could not be saved.";
+  }
+});
+
+document.querySelector("#run-next").addEventListener("click", async () => {
+  status.className = "";
+  status.textContent = "Checking the approved execution queue...";
+  const result = await chrome.runtime.sendMessage({ type: "ROLE_SIGNAL_RUN_NEXT" });
+  status.className = result?.error ? "warn" : "";
+  status.textContent = result?.error || result?.message || "Queue check finished.";
+});
+
 function validatePacket(packet) {
   if (!packet || packet.schemaVersion !== 1 || !packet.applicationUrl || !packet.allowedHost) {
     throw new Error("Paste a valid RoleSignal application packet.");
   }
   if (packet.blockers?.length) throw new Error("Resolve every NEEDS_INPUT item in RoleSignal before browser fill.");
-  if (packet.policy?.neverSubmit !== true) throw new Error("This packet is missing the no-submit safety policy.");
+  if (packet.schemaVersion === 1 && packet.policy?.neverSubmit !== true) throw new Error("This packet is missing the no-submit safety policy.");
 }
 
 function showJob(packet) {

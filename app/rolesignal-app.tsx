@@ -2,8 +2,9 @@
 
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent } from "react";
 import { StudioView, type StudioContent, type StudioDocument } from "./studio-view";
+import { ExecutionView, type ApplicationExecution, type CompanionDevice, type ExecutionSettings } from "./execution-view";
 
-type View = "dashboard" | "discovery" | "matches" | "sources" | "runs" | "autopilot" | "applications" | "studio" | "profile";
+type View = "dashboard" | "discovery" | "matches" | "sources" | "runs" | "autopilot" | "applications" | "studio" | "execution" | "profile";
 
 type Profile = {
   name: string;
@@ -172,6 +173,9 @@ type Workspace = {
   automation?: AutomationSettings | null;
   alerts: JobAlert[];
   studioDocuments: StudioDocument[];
+  executionSettings: ExecutionSettings;
+  companionDevices: CompanionDevice[];
+  executions: ApplicationExecution[];
 };
 
 type ScanReport = {
@@ -269,6 +273,14 @@ const fallbackProfile: Profile = {
   ],
 };
 
+const defaultExecutionSettings: ExecutionSettings = {
+  enabled: false,
+  minScore: 75,
+  dailyLimit: 5,
+  mode: "FILL_ONLY",
+  requireTailoredResume: false,
+};
+
 const navItems: Array<{ id: View; label: string; mark: string }> = [
   { id: "dashboard", label: "Overview", mark: "01" },
   { id: "discovery", label: "Discover jobs", mark: "02" },
@@ -278,7 +290,8 @@ const navItems: Array<{ id: View; label: string; mark: string }> = [
   { id: "autopilot", label: "Automation", mark: "06" },
   { id: "applications", label: "Applications", mark: "07" },
   { id: "studio", label: "Tailored studio", mark: "08" },
-  { id: "profile", label: "Career profile", mark: "09" },
+  { id: "execution", label: "Assisted apply", mark: "09" },
+  { id: "profile", label: "Career profile", mark: "10" },
 ];
 
 const answerFields = [
@@ -323,6 +336,10 @@ export function RoleSignalApp() {
   const [alerts, setAlerts] = useState<JobAlert[]>([]);
   const [studioDocuments, setStudioDocuments] = useState<StudioDocument[]>([]);
   const [selectedStudioId, setSelectedStudioId] = useState("");
+  const [executionSettings, setExecutionSettings] = useState<ExecutionSettings>(defaultExecutionSettings);
+  const [companionDevices, setCompanionDevices] = useState<CompanionDevice[]>([]);
+  const [executions, setExecutions] = useState<ApplicationExecution[]>([]);
+  const [connectionKey, setConnectionKey] = useState("");
   const [answerVault, setAnswerVault] = useState<AnswerVaultRow[]>([]);
   const [answerValues, setAnswerValues] = useState<Record<string, string>>({
     phone: "",
@@ -414,6 +431,9 @@ export function RoleSignalApp() {
       setAutomation(data.automation || null);
       setAlerts(data.alerts || []);
       setStudioDocuments(data.studioDocuments || []);
+      setExecutionSettings(data.executionSettings || defaultExecutionSettings);
+      setCompanionDevices(data.companionDevices || []);
+      setExecutions(data.executions || []);
       setSelectedStudioId((current) => current || data.studioDocuments?.[0]?.id || "");
       if (data.automation) {
         setScheduleEnabled(data.automation.enabled);
@@ -521,6 +541,115 @@ export function RoleSignalApp() {
       setToast("Automation rules saved.");
     } catch (error) {
       setToast(error instanceof Error ? error.message : "Rules could not be saved.");
+    }
+  }
+
+  async function saveExecutionSettings(settings: ExecutionSettings) {
+    setBusy("execution-settings");
+    try {
+      const result = await api<{ settings: ExecutionSettings }>("/api/rolesignal/execution/settings", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(settings),
+      });
+      setExecutionSettings(result.settings);
+      setToast(settings.enabled ? "Phase 7 execution is active." : "Phase 7 execution is paused.");
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "Execution settings could not be saved.");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function queueQualifiedForExecution() {
+    setBusy("execution-queue");
+    try {
+      const result = await api<{ queued: Array<{ execution?: ApplicationExecution }>; dailyLimitReached: boolean }>("/api/rolesignal/execution/queue-qualified", { method: "POST" });
+      await loadWorkspace();
+      setToast(result.dailyLimitReached ? "Today’s application cap has already been reached." : `${result.queued.length} qualified application${result.queued.length === 1 ? " was" : "s were"} evaluated for execution.`);
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "Qualified jobs could not be queued.");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function queueJobForExecution(jobId: string) {
+    setBusy(`execution-queue-${jobId}`);
+    try {
+      await api("/api/rolesignal/execution/queue", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ jobId }),
+      });
+      await loadWorkspace();
+      setToast("Application added to the Phase 7 execution ledger.");
+      setView("execution");
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "The application could not be queued.");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function pairCompanion(name: string) {
+    setBusy("execution-pair");
+    try {
+      const result = await api<{ connectionKey: string; device: CompanionDevice }>("/api/rolesignal/execution/pair", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      setConnectionKey(result.connectionKey);
+      setCompanionDevices((current) => [result.device, ...current]);
+      setToast("Chrome connection key created. Copy it into Companion → Autopilot.");
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "The browser companion could not be paired.");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function revokeCompanion(deviceId: string) {
+    setBusy(`execution-revoke-${deviceId}`);
+    try {
+      await api("/api/rolesignal/execution/revoke-device", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ deviceId }),
+      });
+      await loadWorkspace();
+      setToast("Browser companion access revoked.");
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "The device could not be revoked.");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function retryExecution(executionId: string) {
+    setBusy(`execution-retry-${executionId}`);
+    try {
+      await api("/api/rolesignal/execution/retry", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ executionId }),
+      });
+      await loadWorkspace();
+      setToast("Application rechecked and returned to the appropriate queue.");
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "The application could not be retried.");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function copyConnectionKey() {
+    try {
+      await navigator.clipboard.writeText(connectionKey);
+      setToast("Connection key copied. Paste it into Companion → Autopilot.");
+    } catch {
+      setToast("Clipboard access was blocked. Select and copy the key manually.");
     }
   }
 
@@ -912,7 +1041,7 @@ export function RoleSignalApp() {
         <div className="workspace-switcher">
           <span className="workspace-avatar">RK</span>
           <span><strong>{profile.name}</strong><small>{profile.title}</small></span>
-          <b>v6</b>
+          <b>v7</b>
         </div>
         <nav aria-label="Primary navigation">
           <p className="nav-label">Workspace</p>
@@ -931,7 +1060,7 @@ export function RoleSignalApp() {
         <div className="sidebar-bottom">
           <div className="autopilot-mini">
             <span className="pulse-dot" />
-            <div><strong>{autoApply ? "Auto-stage is on" : "Review mode is on"}</strong><small>Final submit always stays manual</small></div>
+            <div><strong>{executionSettings.enabled ? "Phase 7 execution is on" : autoApply ? "Auto-stage is on" : "Review mode is on"}</strong><small>{executionSettings.mode === "AUTO_SUBMIT" ? "Compatible ATS forms may submit" : "Browser fill pauses before submit"}</small></div>
             <button className={autoApply ? "switch on" : "switch"} onClick={() => { const next = !autoApply; setAutoApply(next); void saveRules(next); }} aria-label="Toggle auto-stage"><span /></button>
           </div>
           <a className="help-link" href="/rolesignal-browser-companion.zip" download><span>+</span> Browser companion</a>
@@ -947,7 +1076,7 @@ export function RoleSignalApp() {
           <div className="top-actions">
             <span className="secure-pill"><i /> Evidence-locked</span>
             <button className="signal-inbox-button" onClick={() => setView("autopilot")}><span>{unreadAlerts.length}</span> Signals</button>
-            <span className="phase-pill">Phase 6</span>
+            <span className="phase-pill">Phase 7</span>
             <button className="avatar-button" aria-label="Career profile">RK</button>
           </div>
         </header>
@@ -1032,7 +1161,7 @@ export function RoleSignalApp() {
                 <div className="coverage-row"><span className="coverage-mark public">01</span><span><strong>Public job feeds</strong><small>Jobicy remote roles + Arbeitnow aggregated ATS listings</small></span><b>Automatic</b></div>
                 <div className="coverage-row"><span className="coverage-mark ats">02</span><span><strong>Company ATS boards</strong><small>{sources.length ? `${sources.length} Greenhouse / Lever / Ashby boards connected` : "Connect Greenhouse, Lever or Ashby boards"}</small></span><b>Automatic</b></div>
                 <div className="coverage-row"><span className="coverage-mark portal">03</span><span><strong>Signed-in portals</strong><small>Ten major job portals via companion capture</small></span><b>Assisted</b></div>
-                <a className="download-button" href="/rolesignal-browser-companion.zip" download>Download Discovery Companion v0.5</a>
+                <a className="download-button" href="/rolesignal-browser-companion.zip" download>Download Discovery Companion v0.7</a>
               </aside>
             </section>
 
@@ -1142,13 +1271,13 @@ export function RoleSignalApp() {
                 <RuleSlider label="Daily preparation limit" value={dailyLimit} min={1} max={12} onChange={setDailyLimit} suffix=" roles" help="A quality cap, not an application quota" />
                 <Guardrail title="Unknown required answers" copy="Compensation, notice period, authorization and declarations" value="Always pause" />
                 <Guardrail title="CAPTCHA or bot protection" copy="No bypasses or security workarounds" value="Manual action" />
-                <Guardrail title="Final submission" copy="Browser companion fills but never submits" value="You click" />
+                <Guardrail title="Final submission" copy="Compatible ATS only, after all checks pass" value={executionSettings.mode === "AUTO_SUBMIT" ? "Policy controlled" : "You click"} />
                 <button className="primary-button wide" onClick={() => void saveRules()}>Save automation rules</button>
               </section>
               <aside className="guardrail-card">
-                <div className="shield-mark">✓</div><span className="card-kicker">Browser companion</span><h3>Fill the facts. Stop at judgment.</h3><p>The extension accepts a signed-off application packet, fills only mapped fields on supported ATS pages and highlights anything it cannot verify.</p>
-                <ul><li><i>✓</i> Greenhouse, Lever and Ashby pages</li><li><i>✓</i> Host-locked application packets</li><li><i>✓</i> Unknown required-field detection</li><li><i>✓</i> No automatic final submission</li></ul>
-                <a className="download-button" href="/rolesignal-browser-companion.zip" download>Download Chrome companion</a>
+                <div className="shield-mark">✓</div><span className="card-kicker">Browser companion v0.7</span><h3>Fill the facts. Stop at uncertainty.</h3><p>The paired extension consumes only your approved Phase 7 queue, fills verified fields and reports every outcome back to RoleSignal.</p>
+                <ul><li><i>✓</i> Conservative Greenhouse, Lever and Ashby execution</li><li><i>✓</i> Host-locked application packets</li><li><i>✓</i> Unknown required-field and CAPTCHA pauses</li><li><i>✓</i> Portal-confirmed submission tracking</li></ul>
+                <button className="download-button" onClick={() => setView("execution")}>Open Assisted Apply</button>
               </aside>
             </div>
             <section className="signal-inbox">
@@ -1160,18 +1289,20 @@ export function RoleSignalApp() {
 
         {view === "applications" && (
           <div className="page inner-page">
-            <PageTitle eyebrow="Application ledger" title="Prepared, blocked and approved" copy="Every state change remains traceable. Approval means browser fill is allowed; final submission remains your action." action="Export ledger" onAction={() => { window.location.href = "/api/rolesignal/export/ledger.csv"; }} />
+            <PageTitle eyebrow="Application ledger" title="Prepared, blocked and approved" copy="Every state change remains traceable. Approved packets can now enter the Phase 7 execution queue for browser fill or compatible auto-submit." action="Export ledger" onAction={() => { window.location.href = "/api/rolesignal/export/ledger.csv"; }} />
             {!packets.length ? <EmptyState title="No application packets yet" copy="Prepare a qualified live match to generate resume guidance and a browser-safe field packet." action="Review matches" onAction={() => setView("matches")} /> : <div className="packet-stack">{packets.map((packet) => <article className="packet-card" key={packet.id}>
               <div className="packet-main"><div><span className="card-kicker">{packet.company}</span><h3>{packet.role}</h3><p><b>{packet.score}/100</b> match / Resume: {packet.resumeStrategy.fit || "DEFAULT"}</p></div><span className={`packet-status ${packet.status.toLowerCase()}`}>{readableStatus(packet.status)}</span></div>
               {packet.kit && <div className="kit-box"><div><span className="card-kicker">Reusable application kit</span><p>{packet.kit.summary}</p></div><div className="kit-answer"><strong>Why this role</strong><p>{packet.kit.whyAnswer}</p></div></div>}
               {packet.resumeStrategy.changes?.length ? <div className="packet-guidance"><strong>Recommended evidence order</strong><ul>{packet.resumeStrategy.changes.map((change) => <li key={change}>{change}</li>)}</ul></div> : null}
               {packet.blockers.length > 0 && <div className="blocker-box"><strong>Needs your input</strong>{packet.blockers.map((blocker) => <span key={blocker.id}>{blocker.question}</span>)}</div>}
-              <div className="packet-actions"><button className="studio-button" disabled={busy === "studio-generate"} onClick={() => void openStudioForPacket(packet)}>Tailor resume</button>{packet.kit && <button className="secondary-button" onClick={() => void copyApplicationKit(packet)}>Copy application kit</button>}<button className="secondary-button" onClick={() => void copyBrowserPacket(packet)}>Copy browser packet</button><button className="secondary-button" onClick={() => openApplication(packet)}>Open application</button><button className="primary-button" disabled={packet.blockers.length > 0 || packet.status === "APPROVED_FOR_FILL" || busy === `approve-${packet.id}`} onClick={() => void approvePacket(packet)}>{packet.status === "APPROVED_FOR_FILL" ? "Approved for fill" : "Approve for fill"}</button></div>
+              <div className="packet-actions"><button className="studio-button" disabled={busy === "studio-generate"} onClick={() => void openStudioForPacket(packet)}>Tailor resume</button>{packet.kit && <button className="secondary-button" onClick={() => void copyApplicationKit(packet)}>Copy application kit</button>}<button className="secondary-button" onClick={() => void copyBrowserPacket(packet)}>Copy browser packet</button><button className="secondary-button" onClick={() => openApplication(packet)}>Open application</button>{executionSettings.enabled && <button className="execution-queue-button" disabled={packet.blockers.length > 0 || busy === `execution-queue-${packet.jobId}`} onClick={() => void queueJobForExecution(packet.jobId)}>Queue for apply</button>}<button className="primary-button" disabled={packet.blockers.length > 0 || packet.status === "APPROVED_FOR_FILL" || busy === `approve-${packet.id}`} onClick={() => void approvePacket(packet)}>{packet.status === "APPROVED_FOR_FILL" ? "Approved for fill" : "Approve for fill"}</button></div>
             </article>)}</div>}
           </div>
         )}
 
         {view === "studio" && <StudioView documents={studioDocuments} jobs={studioJobs} selectedId={selectedStudioId} busy={busy} onSelect={setSelectedStudioId} onGenerate={generateStudio} onSave={saveStudio} onApprove={approveStudio} onCopy={copyStudioText} />}
+
+        {view === "execution" && <ExecutionView key={executionSettings.updatedAt || "phase7-default"} settings={executionSettings} executions={executions} devices={companionDevices} connectionKey={connectionKey} qualifiedCount={qualifiedJobs.length} busy={busy} onSave={saveExecutionSettings} onQueueAll={queueQualifiedForExecution} onPair={pairCompanion} onRevoke={revokeCompanion} onRetry={retryExecution} onCopyKey={copyConnectionKey} />}
 
         {view === "profile" && (
           <div className="page inner-page">

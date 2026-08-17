@@ -265,3 +265,52 @@ export const tailoredDocuments = sqliteTable("tailored_documents", {
   index("idx_tailored_documents_user_updated").on(table.userId, table.updatedAt),
   index("idx_tailored_documents_user_job_status").on(table.userId, table.jobId, table.status),
 ]);
+
+export const executionSettings = sqliteTable("execution_settings", {
+  userId: text("user_id").primaryKey(),
+  enabled: integer("enabled", { mode: "boolean" }).notNull(),
+  minScore: integer("min_score").notNull(),
+  dailyLimit: integer("daily_limit").notNull(),
+  mode: text("mode").notNull(),
+  requireTailoredResume: integer("require_tailored_resume", { mode: "boolean" }).notNull(),
+  updatedAt: text("updated_at").notNull(),
+});
+
+export const companionDevices = sqliteTable("companion_devices", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull(),
+  name: text("name").notNull(),
+  tokenHash: text("token_hash").notNull(),
+  status: text("status").notNull(),
+  lastSeenAt: text("last_seen_at"),
+  createdAt: text("created_at").notNull(),
+}, (table) => [
+  uniqueIndex("idx_companion_devices_token_hash").on(table.tokenHash),
+  index("idx_companion_devices_user_status").on(table.userId, table.status),
+]);
+
+export const applicationExecutions = sqliteTable("application_executions", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull(),
+  jobId: text("job_id").notNull(),
+  packetId: text("packet_id").notNull(),
+  documentId: text("document_id"),
+  deviceId: text("device_id"),
+  platform: text("platform").notNull(),
+  mode: text("mode").notNull(),
+  status: text("status").notNull(),
+  attemptCount: integer("attempt_count").notNull(),
+  fieldsFilled: integer("fields_filled").notNull(),
+  unknownRequiredJson: text("unknown_required_json").notNull(),
+  lastError: text("last_error"),
+  applicationUrl: text("application_url").notNull(),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+  claimedAt: text("claimed_at"),
+  completedAt: text("completed_at"),
+  submittedAt: text("submitted_at"),
+}, (table) => [
+  uniqueIndex("idx_application_executions_user_job").on(table.userId, table.jobId),
+  index("idx_application_executions_user_status_updated").on(table.userId, table.status, table.updatedAt),
+  index("idx_application_executions_device_status").on(table.deviceId, table.status),
+]);

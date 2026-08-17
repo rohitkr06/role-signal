@@ -21,6 +21,13 @@ import {
   type StudioContent,
   type StudioJob,
 } from "../lib/application-studio";
+import {
+  clampExecutionSettings,
+  effectiveExecutionMode,
+  executionCapability,
+  executionStatusFromReport,
+  type ExecutionMode,
+} from "../lib/application-execution";
 
 interface Env {
   ASSETS: Fetcher;
@@ -291,6 +298,45 @@ const schemaStatements = [
     updated_at TEXT NOT NULL,
     approved_at TEXT
   )`,
+  `CREATE TABLE IF NOT EXISTS execution_settings (
+    user_id TEXT PRIMARY KEY,
+    enabled INTEGER NOT NULL,
+    min_score INTEGER NOT NULL,
+    daily_limit INTEGER NOT NULL,
+    mode TEXT NOT NULL,
+    require_tailored_resume INTEGER NOT NULL,
+    updated_at TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS companion_devices (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    token_hash TEXT NOT NULL,
+    status TEXT NOT NULL,
+    last_seen_at TEXT,
+    created_at TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS application_executions (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    job_id TEXT NOT NULL,
+    packet_id TEXT NOT NULL,
+    document_id TEXT,
+    device_id TEXT,
+    platform TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    status TEXT NOT NULL,
+    attempt_count INTEGER NOT NULL,
+    fields_filled INTEGER NOT NULL,
+    unknown_required_json TEXT NOT NULL,
+    last_error TEXT,
+    application_url TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    claimed_at TEXT,
+    completed_at TEXT,
+    submitted_at TEXT
+  )`,
   `CREATE INDEX IF NOT EXISTS idx_resumes_user_id ON resumes(user_id)`,
   `CREATE INDEX IF NOT EXISTS idx_jobs_match_score ON jobs(match_score DESC)`,
   `CREATE INDEX IF NOT EXISTS idx_applications_user_status ON applications(user_id, status)`,
@@ -315,6 +361,11 @@ const schemaStatements = [
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_tailored_documents_user_job_version ON tailored_documents(user_id, job_id, version)`,
   `CREATE INDEX IF NOT EXISTS idx_tailored_documents_user_updated ON tailored_documents(user_id, updated_at DESC)`,
   `CREATE INDEX IF NOT EXISTS idx_tailored_documents_user_job_status ON tailored_documents(user_id, job_id, status)`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_companion_devices_token_hash ON companion_devices(token_hash)`,
+  `CREATE INDEX IF NOT EXISTS idx_companion_devices_user_status ON companion_devices(user_id, status)`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_application_executions_user_job ON application_executions(user_id, job_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_application_executions_user_status_updated ON application_executions(user_id, status, updated_at DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_application_executions_device_status ON application_executions(device_id, status)`,
 ] as const;
 
 async function ensureSchema(env: Env) {
@@ -503,6 +554,101 @@ function rowToStudioDocument(row: Record<string, unknown>) {
     location: row.location,
     score: Number(row.match_score),
   };
+}
+
+function rowToExecutionSettings(row?: Record<string, unknown> | null) {
+  return {
+    enabled: Boolean(row?.enabled),
+    minScore: Number(row?.min_score ?? 75),
+    dailyLimit: Number(row?.daily_limit ?? 5),
+    mode: row?.mode === "AUTO_SUBMIT" ? "AUTO_SUBMIT" : "FILL_ONLY",
+    requireTailoredResume: row ? Boolean(row.require_tailored_resume) : false,
+    updatedAt: row?.updated_at ?? null,
+  };
+}
+
+function rowToCompanionDevice(row: Record<string, unknown>) {
+  return {
+    id: row.id,
+    name: row.name,
+    status: row.status,
+    lastSeenAt: row.last_seen_at,
+    createdAt: row.created_at,
+  };
+}
+
+function rowToExecution(row: Record<string, unknown>) {
+  return {
+    id: row.id,
+    jobId: row.job_id,
+    packetId: row.packet_id,
+    documentId: row.document_id,
+    deviceId: row.device_id,
+    platform: row.platform,
+    mode: row.mode,
+    status: row.status,
+    attemptCount: Number(row.attempt_count),
+    fieldsFilled: Number(row.fields_filled),
+    unknownRequired: parseJson(row.unknown_required_json, []),
+    lastError: row.last_error,
+    applicationUrl: row.application_url,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    claimedAt: row.claimed_at,
+    completedAt: row.completed_at,
+    submittedAt: row.submitted_at,
+    company: row.company,
+    role: row.role,
+    location: row.location,
+    score: Number(row.match_score),
+    documentVersion: row.document_version ? Number(row.document_version) : null,
+  };
+}
+
+function companionCors(origin = "*") {
+  return {
+    "access-control-allow-origin": origin,
+    "access-control-allow-headers": "authorization, content-type",
+    "access-control-allow-methods": "GET, POST, OPTIONS",
+    "access-control-max-age": "86400",
+    "cache-control": "no-store",
+  };
+}
+
+function companionJson(data: unknown, status = 200) {
+  return Response.json(data, { status, headers: companionCors() });
+}
+
+async function sha256(value: string) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function newCompanionToken() {
+  const bytes = crypto.getRandomValues(new Uint8Array(24));
+  const encoded = btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+  return `rs_live_${encoded}`;
+}
+
+async function companionDeviceForRequest(request: Request, env: Env) {
+  const authorization = request.headers.get("authorization") ?? "";
+  const token = authorization.startsWith("Bearer ") ? authorization.slice(7).trim() : "";
+  if (!token.startsWith("rs_live_")) return null;
+  const hash = await sha256(token);
+  return env.DB.prepare(
+    "SELECT * FROM companion_devices WHERE token_hash = ? AND status = 'ACTIVE'",
+  ).bind(hash).first<Record<string, unknown>>();
+}
+
+async function executionRows(env: Env, userId: string) {
+  const result = await env.DB.prepare(
+    `SELECT e.*, j.company, j.role, j.location, j.match_score, d.version AS document_version
+     FROM application_executions e
+     JOIN job_matches j ON j.id = e.job_id
+     LEFT JOIN tailored_documents d ON d.id = e.document_id
+     WHERE e.user_id = ? ORDER BY e.updated_at DESC LIMIT 100`,
+  ).bind(userId).all<Record<string, unknown>>();
+  return result.results.map(rowToExecution);
 }
 
 function studioJobFromRow(row: Record<string, unknown>): StudioJob {
@@ -1579,7 +1725,7 @@ async function prepareApplication(
     "SELECT * FROM job_matches WHERE id = ? AND user_id = ?",
   ).bind(jobId, user.id).first<Record<string, unknown>>();
   if (!job) throw new Error("That job is no longer available in your workspace.");
-  if (Number(job.match_score) < 75 || job.status === "SKIPPED") throw new Error("Only qualified jobs can enter the application queue.");
+  if (Number(job.match_score) < 70 || job.status === "SKIPPED") throw new Error("Only jobs scoring 70 or higher can enter the application queue.");
   const scored = parseJson<ScoredJob>(job.score_json, {} as ScoredJob);
   const questions = Array.isArray(body.requiredQuestions) ? body.requiredQuestions.map((item) => asString(item)).filter(Boolean) : [];
   const unknownPattern = /compensation|salary|ctc|notice period|authorization|visa|sponsor|relocat|demographic|gender|disability|veteran|legal|criminal/i;
@@ -1710,6 +1856,8 @@ async function runAutomationForUser(
          last_error = NULL,
          updated_at = excluded.updated_at`,
     ).bind(user.id, cadenceHours, minScore, completedAt, addHours(completedAt, cadenceHours), completedAt).run();
+    const executionSettings = await env.DB.prepare("SELECT enabled FROM execution_settings WHERE user_id = ?").bind(user.id).first<Record<string, unknown>>();
+    if (Boolean(executionSettings?.enabled)) await queueQualifiedExecutions(env, user, completedAt);
     return run;
   } catch (error) {
     const message = error instanceof Error ? error.message : "Scheduled discovery failed.";
@@ -1750,11 +1898,241 @@ async function executeDueAutomations(env: Env, now: string, onlyUserId?: string)
   return outcomes;
 }
 
+async function queueExecutionForJob(
+  env: Env,
+  user: { id: string; email: string; name: string },
+  job: Record<string, unknown>,
+  settings: ReturnType<typeof rowToExecutionSettings>,
+  now: string,
+) {
+  const existing = await env.DB.prepare(
+    "SELECT * FROM application_executions WHERE user_id = ? AND job_id = ?",
+  ).bind(user.id, job.id).first<Record<string, unknown>>();
+  if (existing?.status === "SUBMITTED") return { execution: rowToExecution({ ...existing, company: job.company, role: job.role, location: job.location, match_score: job.match_score }), created: false };
+
+  const prepared = await prepareApplication({ jobId: job.id }, env, user, now) as Record<string, unknown>;
+  const packetId = asString(prepared.id);
+  const blockers = Array.isArray(prepared.blockers) ? prepared.blockers : [];
+  if (!blockers.length) {
+    await env.DB.batch([
+      env.DB.prepare("UPDATE application_packets SET status = 'APPROVED_FOR_FILL', updated_at = ? WHERE id = ? AND user_id = ?").bind(now, packetId, user.id),
+      env.DB.prepare("UPDATE application_kits SET status = 'APPROVED_FOR_FILL', updated_at = ? WHERE packet_id = ? AND user_id = ?").bind(now, packetId, user.id),
+      env.DB.prepare("INSERT INTO application_events (id, packet_id, user_id, event_type, detail_json, created_at) VALUES (?, ?, ?, 'AUTO_APPROVED_BY_POLICY', '{}', ?)").bind(crypto.randomUUID(), packetId, user.id, now),
+    ]);
+  }
+
+  const document = await env.DB.prepare(
+    `SELECT * FROM tailored_documents
+     WHERE user_id = ? AND job_id = ? AND status = 'APPROVED'
+     ORDER BY version DESC LIMIT 1`,
+  ).bind(user.id, job.id).first<Record<string, unknown>>();
+  const capability = executionCapability(asString(job.application_url), asString(job.platform));
+  const mode = effectiveExecutionMode(settings.mode as ExecutionMode, capability);
+  const status = blockers.length ? "NEEDS_INPUT" : settings.requireTailoredResume && !document ? "NEEDS_DOCUMENT" : "QUEUED";
+  const id = asString(existing?.id, crypto.randomUUID());
+  await env.DB.prepare(
+    `INSERT INTO application_executions
+     (id, user_id, job_id, packet_id, document_id, device_id, platform, mode, status,
+      attempt_count, fields_filled, unknown_required_json, last_error, application_url,
+      created_at, updated_at, claimed_at, completed_at, submitted_at)
+     VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, 0, 0, ?, NULL, ?, ?, ?, NULL, NULL, NULL)
+     ON CONFLICT(user_id, job_id) DO UPDATE SET
+       packet_id = excluded.packet_id,
+       document_id = excluded.document_id,
+       platform = excluded.platform,
+       mode = excluded.mode,
+       status = CASE WHEN application_executions.status = 'SUBMITTED' THEN 'SUBMITTED' ELSE excluded.status END,
+       unknown_required_json = excluded.unknown_required_json,
+       last_error = NULL,
+       application_url = excluded.application_url,
+       updated_at = excluded.updated_at,
+       claimed_at = NULL,
+       completed_at = NULL`,
+  ).bind(
+    id, user.id, job.id, packetId, document?.id ?? null, capability.portal, mode, status,
+    JSON.stringify(blockers.map((blocker) => typeof blocker === "object" && blocker ? (blocker as Record<string, unknown>).question : String(blocker))),
+    job.application_url, now, now,
+  ).run();
+  const saved = await env.DB.prepare(
+    `SELECT e.*, j.company, j.role, j.location, j.match_score, d.version AS document_version
+     FROM application_executions e JOIN job_matches j ON j.id = e.job_id
+     LEFT JOIN tailored_documents d ON d.id = e.document_id
+     WHERE e.id = ? AND e.user_id = ?`,
+  ).bind(id, user.id).first<Record<string, unknown>>();
+  return { execution: saved ? rowToExecution(saved) : null, created: !existing, capability };
+}
+
+async function queueQualifiedExecutions(
+  env: Env,
+  user: { id: string; email: string; name: string },
+  now: string,
+) {
+  const settingsRow = await env.DB.prepare("SELECT * FROM execution_settings WHERE user_id = ?").bind(user.id).first<Record<string, unknown>>();
+  const settings = rowToExecutionSettings(settingsRow);
+  if (!settings.enabled) throw new Error("Enable Phase 7 execution before queueing qualified jobs.");
+  const startOfDay = `${now.slice(0, 10)}T00:00:00.000Z`;
+  const countRow = await env.DB.prepare(
+    "SELECT COUNT(*) AS count FROM application_executions WHERE user_id = ? AND created_at >= ?",
+  ).bind(user.id, startOfDay).first<Record<string, unknown>>();
+  const remaining = Math.max(0, settings.dailyLimit - Number(countRow?.count ?? 0));
+  if (!remaining) return { queued: [], dailyLimitReached: true, remaining: 0 };
+  const jobs = await env.DB.prepare(
+    `SELECT j.* FROM job_matches j
+     LEFT JOIN application_executions e ON e.user_id = j.user_id AND e.job_id = j.id
+     WHERE j.user_id = ? AND j.match_score >= ? AND j.status != 'SKIPPED'
+       AND (e.id IS NULL OR e.status IN ('FAILED', 'NEEDS_INPUT', 'NEEDS_DOCUMENT', 'READY_TO_SUBMIT'))
+     ORDER BY j.match_score DESC, j.updated_at DESC LIMIT ?`,
+  ).bind(user.id, settings.minScore, remaining).all<Record<string, unknown>>();
+  const queued = [];
+  for (const job of jobs.results) queued.push(await queueExecutionForJob(env, user, job, settings, now));
+  return { queued, dailyLimitReached: false, remaining: Math.max(0, remaining - queued.length) };
+}
+
+async function buildExecutionPacket(
+  env: Env,
+  user: { id: string; email: string; name: string },
+  row: Record<string, unknown>,
+) {
+  const profile = await profileForUser(env, user);
+  const vault = await answersForUser(env, user.id);
+  const packet = {
+    ...row,
+    answers_json: JSON.stringify({ ...parseJson(row.answers_json, {}), ...vault.values }),
+  };
+  const base = buildBrowserPacket(profile, row, packet);
+  return {
+    ...base,
+    schemaVersion: 2,
+    executionId: row.execution_id,
+    mode: row.execution_mode,
+    approvedResume: row.document_id ? {
+      filename: `${asString(row.company)}-${asString(row.role)}-RoleSignal.pdf`.replace(/[^a-zA-Z0-9._-]+/g, "-").slice(0, 140),
+      downloadPath: `/api/rolesignal/companion/resume?id=${encodeURIComponent(asString(row.execution_id))}`,
+    } : null,
+    policy: {
+      fillSupportedFields: true,
+      stopOnUnknownRequiredField: true,
+      neverBypassCaptcha: true,
+      allowAutoSubmit: row.execution_mode === "AUTO_SUBMIT",
+      requireSubmissionConfirmation: true,
+    },
+  };
+}
+
 async function handleRoleSignalApi(request: Request, env: Env, url: URL, ctx: ExecutionContext) {
   try {
     await ensureSchema(env);
-    const user = currentUser(request);
     const now = new Date().toISOString();
+
+    if (url.pathname.startsWith("/api/rolesignal/companion/") && request.method === "OPTIONS") {
+      return new Response(null, { status: 204, headers: companionCors() });
+    }
+
+    if (url.pathname.startsWith("/api/rolesignal/companion/")) {
+      const device = await companionDeviceForRequest(request, env);
+      if (!device) return companionJson({ error: "The companion connection key is invalid or has been revoked." }, 401);
+      const companionUser = await env.DB.prepare("SELECT * FROM users WHERE user_id = ?").bind(device.user_id).first<Record<string, unknown>>();
+      const user = {
+        id: asString(device.user_id),
+        email: asString(companionUser?.email),
+        name: asString(companionUser?.display_name, "RoleSignal user"),
+      };
+      await env.DB.prepare("UPDATE companion_devices SET last_seen_at = ? WHERE id = ?").bind(now, device.id).run();
+
+      if (url.pathname === "/api/rolesignal/companion/claim" && request.method === "POST") {
+        const staleBefore = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+        await env.DB.prepare(
+          "UPDATE application_executions SET status = 'QUEUED', device_id = NULL, claimed_at = NULL, updated_at = ? WHERE user_id = ? AND status = 'CLAIMED' AND claimed_at < ?",
+        ).bind(now, user.id, staleBefore).run();
+        const candidate = await env.DB.prepare(
+          `SELECT e.id FROM application_executions e
+           WHERE e.user_id = ? AND e.status = 'QUEUED'
+           ORDER BY e.created_at ASC LIMIT 1`,
+        ).bind(user.id).first<Record<string, unknown>>();
+        if (!candidate) return companionJson({ execution: null, message: "No approved applications are waiting." });
+        const claim = await env.DB.prepare(
+          `UPDATE application_executions SET status = 'CLAIMED', device_id = ?, claimed_at = ?,
+           updated_at = ?, attempt_count = attempt_count + 1 WHERE id = ? AND user_id = ? AND status = 'QUEUED'`,
+        ).bind(device.id, now, now, candidate.id, user.id).run();
+        if (!claim.meta.changes) return companionJson({ execution: null, message: "The next application was claimed by another device." }, 409);
+        const row = await env.DB.prepare(
+          `SELECT e.id AS execution_id, e.mode AS execution_mode, e.document_id,
+                  p.id, p.answers_json, p.blockers_json,
+                  j.id AS job_id, j.company, j.role, j.location, j.application_url, j.match_score
+           FROM application_executions e
+           JOIN application_packets p ON p.id = e.packet_id
+           JOIN job_matches j ON j.id = e.job_id
+           WHERE e.id = ? AND e.user_id = ?`,
+        ).bind(candidate.id, user.id).first<Record<string, unknown>>();
+        if (!row) return companionJson({ error: "The claimed application packet is incomplete." }, 409);
+        return companionJson({ execution: await buildExecutionPacket(env, user, row) });
+      }
+
+      if (url.pathname === "/api/rolesignal/companion/report" && request.method === "POST") {
+        const body = await request.json() as Record<string, unknown>;
+        const executionId = asString(body.executionId);
+        const row = await env.DB.prepare(
+          "SELECT * FROM application_executions WHERE id = ? AND user_id = ? AND device_id = ?",
+        ).bind(executionId, user.id, device.id).first<Record<string, unknown>>();
+        if (!row) return companionJson({ error: "This execution is not assigned to the connected device." }, 404);
+        const unknownRequired = Array.isArray(body.unknownRequired) ? body.unknownRequired.map((item) => asString(item).slice(0, 300)).filter(Boolean).slice(0, 40) : [];
+        const report = {
+          outcome: asString(body.outcome),
+          unknownRequired,
+          captchaDetected: body.captchaDetected === true,
+          submissionConfirmed: body.submissionConfirmed === true,
+        };
+        const status = executionStatusFromReport(report);
+        const fieldsFilled = Math.max(0, Math.min(200, Number(body.fieldsFilled ?? 0)));
+        const lastError = asString(body.error).slice(0, 1_000) || null;
+        const completedAt = ["SUBMITTED", "READY_TO_SUBMIT", "NEEDS_INPUT", "FAILED"].includes(status) ? now : null;
+        await env.DB.batch([
+          env.DB.prepare(
+            `UPDATE application_executions SET status = ?, fields_filled = ?, unknown_required_json = ?,
+             last_error = ?, updated_at = ?, completed_at = ?, submitted_at = CASE WHEN ? = 'SUBMITTED' THEN ? ELSE submitted_at END
+             WHERE id = ? AND user_id = ?`,
+          ).bind(status, fieldsFilled, JSON.stringify(unknownRequired), lastError, now, completedAt, status, now, executionId, user.id),
+          env.DB.prepare("UPDATE application_packets SET status = ?, updated_at = ? WHERE id = ? AND user_id = ?")
+            .bind(status === "SUBMITTED" ? "SUBMITTED" : status, now, row.packet_id, user.id),
+          env.DB.prepare("INSERT INTO application_events (id, packet_id, user_id, event_type, detail_json, created_at) VALUES (?, ?, ?, ?, ?, ?)")
+            .bind(crypto.randomUUID(), row.packet_id, user.id, `EXECUTION_${status}`, JSON.stringify({ fieldsFilled, unknownRequired, captchaDetected: report.captchaDetected, lastError }), now),
+        ]);
+        return companionJson({ saved: true, status });
+      }
+
+      if (url.pathname === "/api/rolesignal/companion/resume" && request.method === "GET") {
+        const executionId = url.searchParams.get("id") ?? "";
+        const row = await env.DB.prepare(
+          `SELECT e.*, d.pdf_object_key, j.company, j.role
+           FROM application_executions e
+           LEFT JOIN tailored_documents d ON d.id = e.document_id AND d.user_id = e.user_id
+           JOIN job_matches j ON j.id = e.job_id
+           WHERE e.id = ? AND e.user_id = ? AND e.device_id = ?`,
+        ).bind(executionId, user.id, device.id).first<Record<string, unknown>>();
+        if (!row) return companionJson({ error: "The resume is not available for this execution." }, 404);
+        let objectKey = asString(row.pdf_object_key);
+        let filename = `${asString(row.company)}-${asString(row.role)}-RoleSignal.pdf`.replace(/[^a-zA-Z0-9._-]+/g, "-");
+        let contentType = "application/pdf";
+        if (!objectKey) {
+          const resume = await env.DB.prepare("SELECT * FROM resumes WHERE user_id = ? ORDER BY created_at DESC LIMIT 1").bind(user.id).first<Record<string, unknown>>();
+          objectKey = asString(resume?.object_key);
+          filename = asString(resume?.filename, "resume.pdf");
+          contentType = asString(resume?.content_type, "application/octet-stream");
+        }
+        if (!objectKey) return companionJson({ error: "Upload or approve a resume before automatic execution." }, 409);
+        const object = await env.RESUMES.get(objectKey);
+        if (!object) return companionJson({ error: "The approved resume file could not be found." }, 404);
+        const headers = new Headers(companionCors());
+        headers.set("content-type", contentType);
+        headers.set("content-disposition", `attachment; filename="${filename.slice(0, 160)}"`);
+        object.writeHttpMetadata(headers);
+        return new Response(object.body, { headers });
+      }
+
+      return companionJson({ error: "Companion endpoint not found." }, 404);
+    }
+
+    const user = currentUser(request);
 
     await env.DB.prepare(
       `INSERT INTO users (user_id, email, display_name, created_at)
@@ -1764,7 +2142,7 @@ async function handleRoleSignalApi(request: Request, env: Env, url: URL, ctx: Ex
 
     if (url.pathname === "/api/rolesignal/workspace" && request.method === "GET") {
       ctx.waitUntil(executeDueAutomations(env, now, user.id));
-      const [resumes, preferences, profile, matches, sources, packets, vault, runs, discoverySearches, discoveryRuns, automation, alerts, studioDocuments] = await Promise.all([
+      const [resumes, preferences, profile, matches, sources, packets, vault, runs, discoverySearches, discoveryRuns, automation, alerts, studioDocuments, executionSettings, devices, executions] = await Promise.all([
         env.DB.prepare(
           `SELECT id, filename, content_type, size_bytes, status, created_at
            FROM resumes WHERE user_id = ? ORDER BY created_at DESC LIMIT 10`,
@@ -1803,6 +2181,9 @@ async function handleRoleSignalApi(request: Request, env: Env, url: URL, ctx: Ex
            FROM tailored_documents d JOIN job_matches j ON j.id = d.job_id
            WHERE d.user_id = ? ORDER BY d.updated_at DESC LIMIT 100`,
         ).bind(user.id).all(),
+        env.DB.prepare("SELECT * FROM execution_settings WHERE user_id = ?").bind(user.id).first<Record<string, unknown>>(),
+        env.DB.prepare("SELECT * FROM companion_devices WHERE user_id = ? ORDER BY created_at DESC LIMIT 10").bind(user.id).all<Record<string, unknown>>(),
+        executionRows(env, user.id),
       ]);
       return json({
         user,
@@ -1819,6 +2200,9 @@ async function handleRoleSignalApi(request: Request, env: Env, url: URL, ctx: Ex
         automation: rowToAutomation(automation),
         alerts: (alerts.results as Record<string, unknown>[]).map(rowToAlert),
         studioDocuments: (studioDocuments.results as Record<string, unknown>[]).map(rowToStudioDocument),
+        executionSettings: rowToExecutionSettings(executionSettings),
+        companionDevices: devices.results.map(rowToCompanionDevice),
+        executions,
       });
     }
 
@@ -1904,6 +2288,76 @@ async function handleRoleSignalApi(request: Request, env: Env, url: URL, ctx: Ex
            updated_at = excluded.updated_at`,
       ).bind(user.id, JSON.stringify(targetRoles), JSON.stringify(locations), JSON.stringify(workModes), threshold, dailyLimit, autoApply ? 1 : 0, now).run();
       return json({ saved: true, matchThreshold: threshold, dailyLimit, autoApply });
+    }
+
+    if (url.pathname === "/api/rolesignal/execution/settings" && request.method === "POST") {
+      const body = await request.json() as Record<string, unknown>;
+      const settings = clampExecutionSettings(body);
+      await env.DB.prepare(
+        `INSERT INTO execution_settings
+         (user_id, enabled, min_score, daily_limit, mode, require_tailored_resume, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(user_id) DO UPDATE SET
+           enabled = excluded.enabled,
+           min_score = excluded.min_score,
+           daily_limit = excluded.daily_limit,
+           mode = excluded.mode,
+           require_tailored_resume = excluded.require_tailored_resume,
+           updated_at = excluded.updated_at`,
+      ).bind(
+        user.id, settings.enabled ? 1 : 0, settings.minScore, settings.dailyLimit,
+        settings.mode, settings.requireTailoredResume ? 1 : 0, now,
+      ).run();
+      const saved = await env.DB.prepare("SELECT * FROM execution_settings WHERE user_id = ?").bind(user.id).first<Record<string, unknown>>();
+      return json({ saved: true, settings: rowToExecutionSettings(saved) });
+    }
+
+    if (url.pathname === "/api/rolesignal/execution/pair" && request.method === "POST") {
+      const body = await request.json() as Record<string, unknown>;
+      const name = asString(body.name, "Chrome on this computer").slice(0, 100);
+      const token = newCompanionToken();
+      const id = crypto.randomUUID();
+      await env.DB.prepare(
+        `INSERT INTO companion_devices (id, user_id, name, token_hash, status, last_seen_at, created_at)
+         VALUES (?, ?, ?, ?, 'ACTIVE', NULL, ?)`,
+      ).bind(id, user.id, name, await sha256(token), now).run();
+      return json({ paired: true, connectionKey: token, device: { id, name, status: "ACTIVE", lastSeenAt: null, createdAt: now } }, 201);
+    }
+
+    if (url.pathname === "/api/rolesignal/execution/revoke-device" && request.method === "POST") {
+      const body = await request.json() as Record<string, unknown>;
+      const deviceId = asString(body.deviceId);
+      const result = await env.DB.prepare("UPDATE companion_devices SET status = 'REVOKED' WHERE id = ? AND user_id = ?").bind(deviceId, user.id).run();
+      if (!result.meta.changes) return json({ error: "Companion device not found." }, 404);
+      await env.DB.prepare("UPDATE application_executions SET status = 'QUEUED', device_id = NULL, claimed_at = NULL, updated_at = ? WHERE user_id = ? AND device_id = ? AND status = 'CLAIMED'").bind(now, user.id, deviceId).run();
+      return json({ revoked: true });
+    }
+
+    if (url.pathname === "/api/rolesignal/execution/queue-qualified" && request.method === "POST") {
+      return json(await queueQualifiedExecutions(env, user, now), 201);
+    }
+
+    if (url.pathname === "/api/rolesignal/execution/queue" && request.method === "POST") {
+      const body = await request.json() as Record<string, unknown>;
+      const jobId = asString(body.jobId);
+      const settingsRow = await env.DB.prepare("SELECT * FROM execution_settings WHERE user_id = ?").bind(user.id).first<Record<string, unknown>>();
+      const settings = rowToExecutionSettings(settingsRow);
+      if (!settings.enabled) return json({ error: "Enable Phase 7 execution before adding an application." }, 409);
+      const job = await env.DB.prepare("SELECT * FROM job_matches WHERE id = ? AND user_id = ?").bind(jobId, user.id).first<Record<string, unknown>>();
+      if (!job) return json({ error: "Job not found." }, 404);
+      return json(await queueExecutionForJob(env, user, job, settings, now), 201);
+    }
+
+    if (url.pathname === "/api/rolesignal/execution/retry" && request.method === "POST") {
+      const body = await request.json() as Record<string, unknown>;
+      const executionId = asString(body.executionId);
+      const row = await env.DB.prepare(
+        `SELECT j.* FROM application_executions e JOIN job_matches j ON j.id = e.job_id
+         WHERE e.id = ? AND e.user_id = ?`,
+      ).bind(executionId, user.id).first<Record<string, unknown>>();
+      if (!row) return json({ error: "Application execution not found." }, 404);
+      const settingsRow = await env.DB.prepare("SELECT * FROM execution_settings WHERE user_id = ?").bind(user.id).first<Record<string, unknown>>();
+      return json(await queueExecutionForJob(env, user, row, rowToExecutionSettings(settingsRow), now));
     }
 
     if (url.pathname === "/api/rolesignal/automation/settings" && request.method === "POST") {

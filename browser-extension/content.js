@@ -5,6 +5,10 @@ if (!globalThis.__roleSignalCompanionLoaded) {
       try { sendResponse(stagePacket(message.packet)); }
       catch (error) { sendResponse({ error: error instanceof Error ? error.message : "Fill failed", filled: 0, unknownRequired: [] }); }
     }
+    if (message?.type === "ROLE_SIGNAL_EXECUTE") {
+      executePacket(message.packet).then(sendResponse).catch((error) => sendResponse({ error: error instanceof Error ? error.message : "Execution failed", fieldsFilled: 0, unknownRequired: [] }));
+      return true;
+    }
     if (message?.type === "ROLE_SIGNAL_CAPTURE") {
       try { sendResponse(captureVisibleJobs()); }
       catch (error) { sendResponse({ error: error instanceof Error ? error.message : "Capture failed", jobs: [] }); }
@@ -113,7 +117,7 @@ function stagePacket(packet) {
   if (location.hostname !== packet.allowedHost && !location.hostname.endsWith(`.${packet.allowedHost}`)) {
     throw new Error(`This packet is locked to ${packet.allowedHost}.`);
   }
-  if (packet.policy?.neverSubmit !== true) throw new Error("Missing no-submit policy.");
+  if (packet.schemaVersion === 1 && packet.policy?.neverSubmit !== true) throw new Error("Missing no-submit policy.");
   const values = { ...(packet.fields || {}), ...(packet.answers || {}) };
   const fields = [...document.querySelectorAll("input:not([type=hidden]):not([type=submit]), textarea, select")];
   const unknownRequired = [];
@@ -138,6 +142,111 @@ function stagePacket(packet) {
 
   showBanner(filled, unknownRequired.length);
   return { filled, unknownRequired };
+}
+
+async function executePacket(packet) {
+  if (packet.schemaVersion !== 2 || !packet.executionId) throw new Error("This is not a Phase 7 execution packet.");
+  if (location.hostname !== packet.allowedHost && !location.hostname.endsWith(`.${packet.allowedHost}`)) throw new Error(`This execution is locked to ${packet.allowedHost}.`);
+  const captchaDetected = hasCaptcha();
+  if (captchaDetected) {
+    showExecutionBanner("RoleSignal paused: CAPTCHA or bot protection requires you.", true);
+    return { outcome: "PAUSED", fieldsFilled: 0, unknownRequired: [], captchaDetected: true, submissionConfirmed: false };
+  }
+
+  const staged = stagePacket(packet);
+  let resumeUploaded = false;
+  const fileInput = [...document.querySelectorAll("input[type='file']")].find((field) => !field.disabled);
+  if (fileInput && packet.approvedResume) {
+    const download = await chrome.runtime.sendMessage({ type: "ROLE_SIGNAL_FETCH_RESUME", path: packet.approvedResume.downloadPath });
+    if (download?.error) throw new Error(download.error);
+    const bytes = Uint8Array.from(atob(download.base64), (character) => character.charCodeAt(0));
+    const file = new File([bytes], packet.approvedResume.filename, { type: download.type || "application/pdf" });
+    const transfer = new DataTransfer();
+    transfer.items.add(file);
+    fileInput.files = transfer.files;
+    fileInput.dispatchEvent(new Event("input", { bubbles: true }));
+    fileInput.dispatchEvent(new Event("change", { bubbles: true }));
+    fileInput.dataset.rolesignal = "filled";
+    fileInput.style.outline = "2px solid #3ea879";
+    resumeUploaded = true;
+  }
+
+  await pause(400);
+  const unknownRequired = [...new Set([...staged.unknownRequired, ...requiredFieldsStillEmpty()])];
+  if (unknownRequired.length) {
+    showExecutionBanner(`RoleSignal paused: ${unknownRequired.length} required field${unknownRequired.length === 1 ? "" : "s"} need your input.`, true);
+    return { outcome: "PAUSED", fieldsFilled: staged.filled + (resumeUploaded ? 1 : 0), unknownRequired, captchaDetected: false, submissionConfirmed: false };
+  }
+
+  if (!packet.policy?.allowAutoSubmit) {
+    showExecutionBanner("RoleSignal filled the application. Review and submit when ready.", false);
+    return { outcome: "READY_TO_SUBMIT", fieldsFilled: staged.filled + (resumeUploaded ? 1 : 0), unknownRequired: [], captchaDetected: false, submissionConfirmed: false };
+  }
+
+  const submit = findFinalSubmit();
+  if (!submit || submit.disabled) {
+    const missing = ["Final application submit control"];
+    showExecutionBanner("RoleSignal filled the application but could not verify the final submit control.", true);
+    return { outcome: "SUBMIT_UNCONFIRMED", fieldsFilled: staged.filled + (resumeUploaded ? 1 : 0), unknownRequired: missing, captchaDetected: false, submissionConfirmed: false };
+  }
+
+  const beforeUrl = location.href;
+  submit.click();
+  await pause(3500);
+  const submissionConfirmed = confirmsSubmission(beforeUrl);
+  showExecutionBanner(submissionConfirmed ? "RoleSignal confirmed the application was submitted." : "RoleSignal clicked submit but needs you to confirm the result.", !submissionConfirmed);
+  return {
+    outcome: submissionConfirmed ? "SUBMITTED" : "SUBMIT_UNCONFIRMED",
+    fieldsFilled: staged.filled + (resumeUploaded ? 1 : 0),
+    unknownRequired: submissionConfirmed ? [] : ["Confirm whether the portal accepted the submission"],
+    captchaDetected: hasCaptcha(),
+    submissionConfirmed,
+  };
+}
+
+function requiredFieldsStillEmpty() {
+  const missing = [];
+  const fields = [...document.querySelectorAll("input[required], textarea[required], select[required]")];
+  for (const field of fields) {
+    if (field.disabled) continue;
+    const context = fieldContext(field) || field.name || field.id || "Required field";
+    if (field.type === "checkbox" && !field.checked) missing.push(context);
+    else if (field.type === "radio") {
+      const name = CSS.escape(field.name || field.id || "");
+      if (name && !document.querySelector(`input[type='radio'][name='${name}']:checked`)) missing.push(context);
+    } else if (field.type === "file" && !(field.files?.length)) missing.push(context);
+    else if (field.tagName === "SELECT" && !field.value) missing.push(context);
+    else if (!field.value?.trim?.()) missing.push(context);
+  }
+  return missing;
+}
+
+function hasCaptcha() {
+  return Boolean(document.querySelector("iframe[src*='recaptcha'], iframe[src*='hcaptcha'], .g-recaptcha, .h-captcha, [data-sitekey]")) || /captcha|verify you are human|security check/i.test(document.body?.innerText?.slice(0, 12000) || "");
+}
+
+function findFinalSubmit() {
+  const controls = [...document.querySelectorAll("button, input[type='submit']")];
+  return controls.find((control) => {
+    const text = cleanText(control.innerText || control.value || control.getAttribute("aria-label") || "");
+    return /^(submit( application)?|send application|complete application|apply now)$/i.test(text) && !/next|continue|save|review/i.test(text);
+  });
+}
+
+function confirmsSubmission(beforeUrl) {
+  const text = cleanText(document.body?.innerText || "").slice(0, 20000);
+  return /application (has been )?(submitted|received)|thank you for (applying|your application)|we received your application/i.test(text) || (location.href !== beforeUrl && /thank|confirmation|submitted|success/i.test(location.href));
+}
+
+function pause(milliseconds) { return new Promise((resolve) => setTimeout(resolve, milliseconds)); }
+
+function showExecutionBanner(message, warning) {
+  document.querySelector("#rolesignal-companion-banner")?.remove();
+  const banner = document.createElement("div");
+  banner.id = "rolesignal-companion-banner";
+  banner.textContent = message;
+  Object.assign(banner.style, { position: "fixed", right: "18px", top: "18px", zIndex: "2147483647", maxWidth: "390px", padding: "13px 16px", borderRadius: "10px", background: warning ? "#7a471f" : "#15392b", color: "white", font: "600 12px/1.45 system-ui", boxShadow: "0 12px 32px rgba(0,0,0,.2)" });
+  document.body.appendChild(banner);
 }
 
 function fieldContext(field) {

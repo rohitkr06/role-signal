@@ -1,9 +1,11 @@
 {
   "manifest_version": 3,
   "name": "RoleSignal Browser Companion",
-  "version": "0.5.0",
-  "description": "Captures visible cross-portal job listings and stages verified application fields without submitting.",
-  "permissions": ["activeTab", "scripting", "storage", "clipboardWrite"],
+  "version": "0.7.0",
+  "description": "Discovers visible jobs and executes approved RoleSignal application queues with evidence-backed guardrails.",
+  "permissions": ["activeTab", "scripting", "storage", "clipboardWrite", "alarms", "tabs"],
+  "host_permissions": ["<all_urls>"],
+  "background": { "service_worker": "background.js" },
   "action": {
     "default_title": "RoleSignal",
     "default_popup": "popup.html"

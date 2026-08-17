@@ -1,6 +1,17 @@
 # RoleSignal
 
-RoleSignal is an explainable job-matching and approval-first application workspace for backend engineers. It optimizes for interview probability, role quality, and career upside instead of application volume.
+RoleSignal is an explainable job-matching and guarded application-execution workspace for backend engineers. It balances interview probability, application volume, and truthful evidence.
+
+## Phase 7 capabilities
+
+- Converts qualified matches into a durable execution queue with a configurable 70–95% threshold and daily cap.
+- Pairs a Chrome companion using a one-time connection key whose hash is stored in D1.
+- Polls only approved applications, opens the official URL, fills verified fields, and uploads the approved tailored or primary resume.
+- Supports opt-in conservative auto-submit on Greenhouse, Lever, and Ashby single-page forms.
+- Downgrades LinkedIn, Naukri, Workday, Indeed, and unknown portals to assisted fill when their flows cannot be safely confirmed.
+- Pauses on CAPTCHA, unanswered required fields, missing resumes, unsupported submit controls, and unconfirmed submissions.
+- Tracks queued, claimed, needs-input, ready-to-submit, submitted, and failed outcomes with an auditable application event.
+- Runs the execution queue automatically after scheduled discovery when Phase 7 is enabled.
 
 ## Phase 6 capabilities
 
@@ -19,7 +30,7 @@ RoleSignal is an explainable job-matching and approval-first application workspa
 - Separates language mismatch from engineering-domain mismatch.
 - Deduplicates on company, role, and location while preferring official URLs.
 - Prepares application packets, resume-ordering guidance, blockers, and an audit trail.
-- Includes a Chrome companion that fills supported fields but never submits.
+- Includes a Chrome companion that fills supported fields; Phase 7 adds policy-controlled compatible submission.
 - Runs every connected source in one resilient batch and keeps a durable search report.
 - Ranks a focused top three across companies and exports the full run as Markdown.
 - Stores recurring, explicitly verified application answers in a private answer vault.
@@ -40,7 +51,7 @@ RoleSignal is an explainable job-matching and approval-first application workspa
 
 ## Safety model
 
-Unknown compensation, notice-period, work-authorization, legal, relocation, and demographic answers are marked `NEEDS_INPUT`. CAPTCHAs and access controls are never bypassed. The browser companion is host-locked and final submission always remains manual.
+Unknown compensation, notice-period, work-authorization, legal, relocation, and demographic answers are marked `NEEDS_INPUT`. CAPTCHAs and access controls are never bypassed. The browser companion is host-locked. Automatic final submission is opt-in and limited to compatible ATS pages where every required field is satisfied and a success state can be confirmed.
 
 ## Run locally
 
@@ -65,7 +76,7 @@ npm run db:generate
 
 ## Browser companion
 
-The extension source is in `browser-extension/`. Load it unpacked from `chrome://extensions`, or download the generated zip from the running app. Version 0.5 can capture job cards visible across the expanded portal set and copy a normalized discovery batch back to RoleSignal.
+The extension source is in `browser-extension/`. Load it unpacked from `chrome://extensions`, or download the generated zip from the running app. Version 0.7 can capture visible jobs, pair with the Phase 7 execution queue, fill approved applications, upload resumes, and apply the configured submission guardrails.
 
 ## Publish to GitHub
 
@@ -75,7 +86,7 @@ Create an empty repository on GitHub, then add it as the local `origin` and push
 
 - Vinext / React 19 interface
 - Cloudflare Worker API
-- D1 for profiles, job matches, preferences, verified answers, saved discovery searches, automation schedules, alerts, discovery runs, application kits, tailored document versions, packets, and audit events
+- D1 for profiles, job matches, preferences, verified answers, saved discovery searches, automation schedules, alerts, discovery runs, application kits, tailored document versions, execution policies, paired devices, application executions, packets, and audit events
 - R2 for source resumes and approved DOCX/PDF exports
 - Drizzle schema and checked-in SQL migrations
 - Public Greenhouse, Lever, Ashby, Jobicy, and Arbeitnow feeds for server-side discovery
