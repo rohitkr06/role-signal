@@ -12,6 +12,15 @@ import {
   type JobInput,
   type ScoredJob,
 } from "../lib/rolesignal";
+import {
+  buildResumeDocx,
+  buildResumePdf,
+  buildStudioContent,
+  validateStudioContent,
+  type EvidenceBinding,
+  type StudioContent,
+  type StudioJob,
+} from "../lib/application-studio";
 
 interface Env {
   ASSETS: Fetcher;
@@ -265,6 +274,23 @@ const schemaStatements = [
     created_at TEXT NOT NULL,
     read_at TEXT
   )`,
+  `CREATE TABLE IF NOT EXISTS tailored_documents (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    job_id TEXT NOT NULL,
+    resume_id TEXT,
+    version INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    title TEXT NOT NULL,
+    content_json TEXT NOT NULL,
+    evidence_json TEXT NOT NULL,
+    grounding_score INTEGER NOT NULL,
+    docx_object_key TEXT,
+    pdf_object_key TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    approved_at TEXT
+  )`,
   `CREATE INDEX IF NOT EXISTS idx_resumes_user_id ON resumes(user_id)`,
   `CREATE INDEX IF NOT EXISTS idx_jobs_match_score ON jobs(match_score DESC)`,
   `CREATE INDEX IF NOT EXISTS idx_applications_user_status ON applications(user_id, status)`,
@@ -286,6 +312,9 @@ const schemaStatements = [
   `CREATE INDEX IF NOT EXISTS idx_automation_settings_due ON automation_settings(enabled, next_run_at)`,
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_job_alerts_user_job_kind ON job_alerts(user_id, job_id, kind)`,
   `CREATE INDEX IF NOT EXISTS idx_job_alerts_user_status_created ON job_alerts(user_id, status, created_at DESC)`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_tailored_documents_user_job_version ON tailored_documents(user_id, job_id, version)`,
+  `CREATE INDEX IF NOT EXISTS idx_tailored_documents_user_updated ON tailored_documents(user_id, updated_at DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_tailored_documents_user_job_status ON tailored_documents(user_id, job_id, status)`,
 ] as const;
 
 async function ensureSchema(env: Env) {
@@ -451,6 +480,83 @@ function rowToAlert(row: Record<string, unknown>) {
     createdAt: row.created_at,
     readAt: row.read_at,
   };
+}
+
+function rowToStudioDocument(row: Record<string, unknown>) {
+  return {
+    id: row.id,
+    jobId: row.job_id,
+    resumeId: row.resume_id,
+    version: Number(row.version),
+    status: row.status,
+    title: row.title,
+    content: parseJson<StudioContent | null>(row.content_json, null),
+    evidence: parseJson<EvidenceBinding[]>(row.evidence_json, []),
+    groundingScore: Number(row.grounding_score),
+    hasDocx: Boolean(row.docx_object_key),
+    hasPdf: Boolean(row.pdf_object_key),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    approvedAt: row.approved_at,
+    company: row.company,
+    role: row.role,
+    location: row.location,
+    score: Number(row.match_score),
+  };
+}
+
+function studioJobFromRow(row: Record<string, unknown>): StudioJob {
+  return {
+    id: asString(row.id),
+    company: asString(row.company),
+    role: asString(row.role),
+    location: asString(row.location),
+    description: asString(row.description),
+    applicationUrl: asString(row.application_url),
+    score: Number(row.match_score),
+  };
+}
+
+function safeStudioContent(value: unknown): StudioContent {
+  const body = value && typeof value === "object" ? value as Record<string, unknown> : {};
+  const sections = Array.isArray(body.sections) ? body.sections.slice(0, 8).map((section, sectionIndex) => {
+    const item = section && typeof section === "object" ? section as Record<string, unknown> : {};
+    return {
+      id: asString(item.id, `section-${sectionIndex + 1}`).replace(/[^a-zA-Z0-9-]/g, "-").slice(0, 80),
+      title: asString(item.title, "Section").slice(0, 120),
+      items: Array.isArray(item.items) ? item.items.map((entry) => asString(entry).slice(0, 1_200)).filter(Boolean).slice(0, 30) : [],
+    };
+  }).filter((section) => section.items.length) : [];
+  const answers = Array.isArray(body.answers) ? body.answers.slice(0, 10).map((answer, answerIndex) => {
+    const item = answer && typeof answer === "object" ? answer as Record<string, unknown> : {};
+    return {
+      id: asString(item.id, `answer-${answerIndex + 1}`).replace(/[^a-zA-Z0-9-]/g, "-").slice(0, 80),
+      question: asString(item.question, "Application question").slice(0, 500),
+      answer: asString(item.answer).slice(0, 2_000),
+    };
+  }).filter((answer) => answer.answer) : [];
+  return {
+    name: asString(body.name, "Candidate").slice(0, 120),
+    headline: asString(body.headline, "Software Engineer").slice(0, 180),
+    contactLine: asString(body.contactLine).slice(0, 500),
+    summary: asString(body.summary).slice(0, 1_200),
+    skills: Array.isArray(body.skills) ? body.skills.map((skill) => asString(skill).slice(0, 100)).filter(Boolean).slice(0, 30) : [],
+    sections,
+    coverNote: asString(body.coverNote).slice(0, 2_500),
+    answers,
+  };
+}
+
+async function studioSources(env: Env, user: { id: string; email: string; name: string }) {
+  const row = await env.DB.prepare(
+    "SELECT resume_id, raw_text, extracted_json FROM career_profiles WHERE user_id = ?",
+  ).bind(user.id).first<Record<string, unknown>>();
+  const rawText = asString(row?.raw_text).slice(0, 200_000);
+  const stored = parseJson<CandidateProfile>(row?.extracted_json, { ...ROHIT_PROFILE, name: user.name, email: user.email });
+  const reparsed = rawText ? profileFromResumeText(rawText, stored.name || user.name, stored.email || user.email) : null;
+  const profile = reparsed ? { ...stored, ...reparsed, name: reparsed.name || user.name, email: reparsed.email || user.email } : await profileForUser(env, user);
+  const vault = await answersForUser(env, user.id);
+  return { resumeId: asString(row?.resume_id), rawText, profile, vault: vault.values };
 }
 
 const answerDefinitions = {
@@ -1658,7 +1764,7 @@ async function handleRoleSignalApi(request: Request, env: Env, url: URL, ctx: Ex
 
     if (url.pathname === "/api/rolesignal/workspace" && request.method === "GET") {
       ctx.waitUntil(executeDueAutomations(env, now, user.id));
-      const [resumes, preferences, profile, matches, sources, packets, vault, runs, discoverySearches, discoveryRuns, automation, alerts] = await Promise.all([
+      const [resumes, preferences, profile, matches, sources, packets, vault, runs, discoverySearches, discoveryRuns, automation, alerts, studioDocuments] = await Promise.all([
         env.DB.prepare(
           `SELECT id, filename, content_type, size_bytes, status, created_at
            FROM resumes WHERE user_id = ? ORDER BY created_at DESC LIMIT 10`,
@@ -1692,6 +1798,11 @@ async function handleRoleSignalApi(request: Request, env: Env, url: URL, ctx: Ex
         env.DB.prepare(
           "SELECT * FROM job_alerts WHERE user_id = ? ORDER BY created_at DESC LIMIT 50",
         ).bind(user.id).all(),
+        env.DB.prepare(
+          `SELECT d.*, j.company, j.role, j.location, j.match_score
+           FROM tailored_documents d JOIN job_matches j ON j.id = d.job_id
+           WHERE d.user_id = ? ORDER BY d.updated_at DESC LIMIT 100`,
+        ).bind(user.id).all(),
       ]);
       return json({
         user,
@@ -1707,6 +1818,7 @@ async function handleRoleSignalApi(request: Request, env: Env, url: URL, ctx: Ex
         discoveryRuns: (discoveryRuns.results as Record<string, unknown>[]).map(rowToDiscoveryRun),
         automation: rowToAutomation(automation),
         alerts: (alerts.results as Record<string, unknown>[]).map(rowToAlert),
+        studioDocuments: (studioDocuments.results as Record<string, unknown>[]).map(rowToStudioDocument),
       });
     }
 
@@ -1998,6 +2110,146 @@ async function handleRoleSignalApi(request: Request, env: Env, url: URL, ctx: Ex
           status: kit.status,
         },
       });
+    }
+
+    if (url.pathname === "/api/rolesignal/studio/generate" && request.method === "POST") {
+      const body = await request.json() as Record<string, unknown>;
+      const jobId = asString(body.jobId);
+      const jobRow = await env.DB.prepare(
+        "SELECT * FROM job_matches WHERE id = ? AND user_id = ?",
+      ).bind(jobId, user.id).first<Record<string, unknown>>();
+      if (!jobRow) return json({ error: "Choose a live matched job before creating a tailored version." }, 404);
+      if (Number(jobRow.match_score) < 75 || jobRow.status === "SKIPPED") return json({ error: "Only qualified jobs can enter the Tailored Studio." }, 409);
+      const sources = await studioSources(env, user);
+      const job = studioJobFromRow(jobRow);
+      const scored = parseJson<Partial<ScoredJob>>(jobRow.score_json, {});
+      const generated = buildStudioContent(sources.profile, sources.rawText, job, scored, sources.vault);
+      const versionRow = await env.DB.prepare(
+        "SELECT COALESCE(MAX(version), 0) AS latest_version FROM tailored_documents WHERE user_id = ? AND job_id = ?",
+      ).bind(user.id, jobId).first<Record<string, unknown>>();
+      const version = Number(versionRow?.latest_version ?? 0) + 1;
+      const id = crypto.randomUUID();
+      const title = `${job.company} - ${job.role}`.slice(0, 300);
+      await env.DB.prepare(
+        `INSERT INTO tailored_documents
+         (id, user_id, job_id, resume_id, version, status, title, content_json, evidence_json,
+          grounding_score, docx_object_key, pdf_object_key, created_at, updated_at, approved_at)
+         VALUES (?, ?, ?, ?, ?, 'DRAFT', ?, ?, ?, ?, NULL, NULL, ?, ?, NULL)`,
+      ).bind(
+        id, user.id, jobId, sources.resumeId || null, version, title,
+        JSON.stringify(generated.content), JSON.stringify(generated.evidence), generated.groundingScore, now, now,
+      ).run();
+      const saved = await env.DB.prepare(
+        `SELECT d.*, j.company, j.role, j.location, j.match_score
+         FROM tailored_documents d JOIN job_matches j ON j.id = d.job_id
+         WHERE d.id = ? AND d.user_id = ?`,
+      ).bind(id, user.id).first<Record<string, unknown>>();
+      return json({ document: saved ? rowToStudioDocument(saved) : null }, 201);
+    }
+
+    if (url.pathname === "/api/rolesignal/studio/documents" && request.method === "PATCH") {
+      const body = await request.json() as Record<string, unknown>;
+      const id = asString(body.id);
+      const row = await env.DB.prepare(
+        `SELECT d.*, j.company, j.role, j.location, j.description, j.application_url, j.match_score
+         FROM tailored_documents d JOIN job_matches j ON j.id = d.job_id
+         WHERE d.id = ? AND d.user_id = ?`,
+      ).bind(id, user.id).first<Record<string, unknown>>();
+      if (!row) return json({ error: "Tailored document not found." }, 404);
+      const content = safeStudioContent(body.content);
+      if (!content.summary || !content.sections.length || !content.skills.length) return json({ error: "Keep a summary, skills, and at least one evidence section before saving." }, 400);
+      const sources = await studioSources(env, user);
+      const job = studioJobFromRow(row);
+      const previous = parseJson<EvidenceBinding[]>(row.evidence_json, []);
+      const validation = validateStudioContent(content, previous, sources.profile, sources.rawText, job, sources.vault);
+      await env.DB.prepare(
+        `UPDATE tailored_documents SET content_json = ?, evidence_json = ?, grounding_score = ?, status = 'DRAFT',
+         docx_object_key = NULL, pdf_object_key = NULL, approved_at = NULL, updated_at = ?
+         WHERE id = ? AND user_id = ?`,
+      ).bind(JSON.stringify(content), JSON.stringify(validation.evidence), validation.groundingScore, now, id, user.id).run();
+      const saved = await env.DB.prepare(
+        `SELECT d.*, j.company, j.role, j.location, j.match_score
+         FROM tailored_documents d JOIN job_matches j ON j.id = d.job_id
+         WHERE d.id = ? AND d.user_id = ?`,
+      ).bind(id, user.id).first<Record<string, unknown>>();
+      return json({ document: saved ? rowToStudioDocument(saved) : null });
+    }
+
+    if (url.pathname === "/api/rolesignal/studio/approve" && request.method === "POST") {
+      const body = await request.json() as Record<string, unknown>;
+      const id = asString(body.id);
+      const row = await env.DB.prepare(
+        `SELECT d.*, j.company, j.role, j.location, j.description, j.application_url, j.match_score
+         FROM tailored_documents d JOIN job_matches j ON j.id = d.job_id
+         WHERE d.id = ? AND d.user_id = ?`,
+      ).bind(id, user.id).first<Record<string, unknown>>();
+      if (!row) return json({ error: "Tailored document not found." }, 404);
+      const content = safeStudioContent(parseJson(row.content_json, {}));
+      const sources = await studioSources(env, user);
+      const job = studioJobFromRow(row);
+      const validation = validateStudioContent(content, parseJson(row.evidence_json, []), sources.profile, sources.rawText, job, sources.vault);
+      const unsupported = validation.evidence.filter((binding) => binding.status !== "VERIFIED");
+      if (unsupported.length) {
+        await env.DB.prepare(
+          "UPDATE tailored_documents SET evidence_json = ?, grounding_score = ?, status = 'DRAFT', updated_at = ? WHERE id = ? AND user_id = ?",
+        ).bind(JSON.stringify(validation.evidence), validation.groundingScore, now, id, user.id).run();
+        return json({ error: `${unsupported.length} edited claim${unsupported.length === 1 ? " needs" : "s need"} source evidence before approval.`, groundingScore: validation.groundingScore, unsupported }, 409);
+      }
+      const version = Number(row.version);
+      const baseKey = `studio/${user.id}/${id}/v${version}`;
+      const docxKey = `${baseKey}.docx`;
+      const pdfKey = `${baseKey}.pdf`;
+      const docx = buildResumeDocx(content, job, now);
+      const pdf = buildResumePdf(content, job);
+      await Promise.all([
+        env.RESUMES.put(docxKey, docx, {
+          httpMetadata: { contentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" },
+          customMetadata: { owner: user.id, jobId: job.id, documentId: id, version: String(version) },
+        }),
+        env.RESUMES.put(pdfKey, pdf, {
+          httpMetadata: { contentType: "application/pdf" },
+          customMetadata: { owner: user.id, jobId: job.id, documentId: id, version: String(version) },
+        }),
+      ]);
+      await env.DB.batch([
+        env.DB.prepare(
+          "UPDATE tailored_documents SET status = 'SUPERSEDED', updated_at = ? WHERE user_id = ? AND job_id = ? AND status = 'APPROVED' AND id != ?",
+        ).bind(now, user.id, row.job_id, id),
+        env.DB.prepare(
+          `UPDATE tailored_documents SET status = 'APPROVED', evidence_json = ?, grounding_score = 100,
+           docx_object_key = ?, pdf_object_key = ?, approved_at = ?, updated_at = ? WHERE id = ? AND user_id = ?`,
+        ).bind(JSON.stringify(validation.evidence), docxKey, pdfKey, now, now, id, user.id),
+      ]);
+      const saved = await env.DB.prepare(
+        `SELECT d.*, j.company, j.role, j.location, j.match_score
+         FROM tailored_documents d JOIN job_matches j ON j.id = d.job_id
+         WHERE d.id = ? AND d.user_id = ?`,
+      ).bind(id, user.id).first<Record<string, unknown>>();
+      return json({ approved: true, document: saved ? rowToStudioDocument(saved) : null });
+    }
+
+    if (url.pathname === "/api/rolesignal/studio/download" && request.method === "GET") {
+      const id = url.searchParams.get("id") ?? "";
+      const format = url.searchParams.get("format") === "pdf" ? "pdf" : "docx";
+      const row = await env.DB.prepare(
+        `SELECT d.*, j.company, j.role FROM tailored_documents d JOIN job_matches j ON j.id = d.job_id
+         WHERE d.id = ? AND d.user_id = ?`,
+      ).bind(id, user.id).first<Record<string, unknown>>();
+      if (!row) return json({ error: "Tailored document not found." }, 404);
+      if (row.status !== "APPROVED" && row.status !== "SUPERSEDED") return json({ error: "Approve this evidence-grounded version before downloading it." }, 409);
+      const objectKey = asString(format === "pdf" ? row.pdf_object_key : row.docx_object_key);
+      if (!objectKey) return json({ error: "This document format has not been generated yet." }, 404);
+      const object = await env.RESUMES.get(objectKey);
+      if (!object) return json({ error: "The generated file is no longer available." }, 404);
+      const safeBase = `${asString(row.company)}-${asString(row.role)}-v${Number(row.version)}`.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/-+/g, "-").slice(0, 140);
+      const headers = new Headers({
+        "content-type": format === "pdf" ? "application/pdf" : "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "content-disposition": `attachment; filename="${safeBase}.${format}"`,
+        "cache-control": "private, no-store",
+      });
+      object.writeHttpMetadata(headers);
+      headers.set("etag", object.httpEtag);
+      return new Response(object.body, { headers });
     }
 
     if (url.pathname === "/api/rolesignal/export/ledger.csv" && request.method === "GET") {

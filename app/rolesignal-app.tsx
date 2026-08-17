@@ -1,8 +1,9 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent } from "react";
+import { StudioView, type StudioContent, type StudioDocument } from "./studio-view";
 
-type View = "dashboard" | "discovery" | "matches" | "sources" | "runs" | "autopilot" | "applications" | "profile";
+type View = "dashboard" | "discovery" | "matches" | "sources" | "runs" | "autopilot" | "applications" | "studio" | "profile";
 
 type Profile = {
   name: string;
@@ -170,6 +171,7 @@ type Workspace = {
   discoveryRuns: DiscoveryRun[];
   automation?: AutomationSettings | null;
   alerts: JobAlert[];
+  studioDocuments: StudioDocument[];
 };
 
 type ScanReport = {
@@ -275,7 +277,8 @@ const navItems: Array<{ id: View; label: string; mark: string }> = [
   { id: "runs", label: "ATS runs", mark: "05" },
   { id: "autopilot", label: "Automation", mark: "06" },
   { id: "applications", label: "Applications", mark: "07" },
-  { id: "profile", label: "Career profile", mark: "08" },
+  { id: "studio", label: "Tailored studio", mark: "08" },
+  { id: "profile", label: "Career profile", mark: "09" },
 ];
 
 const answerFields = [
@@ -318,6 +321,8 @@ export function RoleSignalApp() {
   const [discoveryRuns, setDiscoveryRuns] = useState<DiscoveryRun[]>([]);
   const [automation, setAutomation] = useState<AutomationSettings | null>(null);
   const [alerts, setAlerts] = useState<JobAlert[]>([]);
+  const [studioDocuments, setStudioDocuments] = useState<StudioDocument[]>([]);
+  const [selectedStudioId, setSelectedStudioId] = useState("");
   const [answerVault, setAnswerVault] = useState<AnswerVaultRow[]>([]);
   const [answerValues, setAnswerValues] = useState<Record<string, string>>({
     phone: "",
@@ -362,6 +367,7 @@ export function RoleSignalApp() {
   const latestRun = searchRuns[0];
   const latestDiscovery = discoveryRuns[0];
   const unreadAlerts = alerts.filter((alert) => alert.status === "UNREAD");
+  const studioJobs = liveJobs.filter((job) => job.score >= 75 && job.status !== "SKIPPED" && !job.isSample);
   const primaryKeyword = discoveryForm.keywords.split(",")[0]?.trim() || "Backend Engineer";
   const primaryLocation = discoveryForm.locations.split(",")[0]?.trim() || "India";
   const portalSearches = [
@@ -407,6 +413,8 @@ export function RoleSignalApp() {
       setDiscoveryRuns(data.discoveryRuns || []);
       setAutomation(data.automation || null);
       setAlerts(data.alerts || []);
+      setStudioDocuments(data.studioDocuments || []);
+      setSelectedStudioId((current) => current || data.studioDocuments?.[0]?.id || "");
       if (data.automation) {
         setScheduleEnabled(data.automation.enabled);
         setCadenceHours(data.automation.cadenceHours);
@@ -816,6 +824,80 @@ export function RoleSignalApp() {
     }
   }
 
+  async function generateStudio(jobId: string) {
+    setBusy("studio-generate");
+    try {
+      const result = await api<{ document: StudioDocument }>("/api/rolesignal/studio/generate", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ jobId }),
+      });
+      await loadWorkspace();
+      setSelectedStudioId(result.document.id);
+      setView("studio");
+      setToast(`Tailored resume v${result.document.version} created with ${result.document.groundingScore}% evidence coverage.`);
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "The tailored draft could not be generated.");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function saveStudio(id: string, content: StudioContent) {
+    setBusy(`studio-save-${id}`);
+    try {
+      const result = await api<{ document: StudioDocument }>("/api/rolesignal/studio/documents", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id, content }),
+      });
+      setStudioDocuments((current) => current.map((document) => document.id === id ? result.document : document));
+      setToast(result.document.groundingScore === 100 ? "Draft saved. Every claim remains grounded." : `Draft saved. ${result.document.evidence.filter((item) => item.status !== "VERIFIED").length} edited claims need evidence review.`);
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "The tailored draft could not be saved.");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function approveStudio(id: string) {
+    setBusy(`studio-approve-${id}`);
+    try {
+      const result = await api<{ document: StudioDocument }>("/api/rolesignal/studio/approve", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id }),
+      });
+      await loadWorkspace();
+      setSelectedStudioId(result.document.id);
+      setToast("Approved DOCX and PDF resumes are ready to download.");
+    } catch (error) {
+      await loadWorkspace();
+      setToast(error instanceof Error ? error.message : "This version cannot be approved yet.");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function copyStudioText(value: string, label: string) {
+    try {
+      await navigator.clipboard.writeText(value);
+      setToast(`${label} copied.`);
+    } catch {
+      setToast("Clipboard access was blocked. Select the text and copy it manually.");
+    }
+  }
+
+  async function openStudioForPacket(packet: ApplicationPacket) {
+    const existing = studioDocuments.find((document) => document.jobId === packet.jobId);
+    if (existing) {
+      setSelectedStudioId(existing.id);
+      setView("studio");
+      return;
+    }
+    await generateStudio(packet.jobId);
+  }
+
   function openApplication(packet: ApplicationPacket) {
     window.open(packet.applicationUrl, "_blank", "noopener,noreferrer");
   }
@@ -830,7 +912,7 @@ export function RoleSignalApp() {
         <div className="workspace-switcher">
           <span className="workspace-avatar">RK</span>
           <span><strong>{profile.name}</strong><small>{profile.title}</small></span>
-          <b>v5</b>
+          <b>v6</b>
         </div>
         <nav aria-label="Primary navigation">
           <p className="nav-label">Workspace</p>
@@ -842,6 +924,7 @@ export function RoleSignalApp() {
               {item.id === "runs" && searchRuns.length > 0 && <b>{searchRuns.length}</b>}
               {item.id === "autopilot" && unreadAlerts.length > 0 && <b>{unreadAlerts.length}</b>}
               {item.id === "applications" && packets.length > 0 && <b>{packets.length}</b>}
+              {item.id === "studio" && studioDocuments.length > 0 && <b>{studioDocuments.length}</b>}
             </button>
           ))}
         </nav>
@@ -864,7 +947,7 @@ export function RoleSignalApp() {
           <div className="top-actions">
             <span className="secure-pill"><i /> Evidence-locked</span>
             <button className="signal-inbox-button" onClick={() => setView("autopilot")}><span>{unreadAlerts.length}</span> Signals</button>
-            <span className="phase-pill">Phase 5</span>
+            <span className="phase-pill">Phase 6</span>
             <button className="avatar-button" aria-label="Career profile">RK</button>
           </div>
         </header>
@@ -883,6 +966,7 @@ export function RoleSignalApp() {
             {latestDiscovery && <section className="latest-run-strip discovery-strip"><div><span className={`run-status ${latestDiscovery.status.toLowerCase()}`}>{readableStatus(latestDiscovery.status)}</span><span><strong>Latest cross-portal discovery</strong><small>{latestDiscovery.discovered} listings checked / {latestDiscovery.imported} new / {latestDiscovery.qualified} qualified / {postedLabel(latestDiscovery.completedAt || latestDiscovery.startedAt)}</small></span></div><button className="text-button" onClick={() => setView("discovery")}>Open discovery -&gt;</button></section>}
             {latestRun && <section className="latest-run-strip"><div><span className={`run-status ${latestRun.status.toLowerCase()}`}>{readableStatus(latestRun.status)}</span><span><strong>Latest search run</strong><small>{latestRun.uniqueJobs} unique jobs / {latestRun.ready} ready to review / {postedLabel(latestRun.completedAt || latestRun.startedAt)}</small></span></div><button className="text-button" onClick={() => setView("runs")}>Open run center -&gt;</button></section>}
             {unreadAlerts.length > 0 && <section className="signal-banner"><div><span className="signal-count">{unreadAlerts.length}</span><span><strong>New matches in your Signal inbox</strong><small>{unreadAlerts[0].title} / {unreadAlerts[0].detail.score || "Qualified"} match score</small></span></div><button className="text-button" onClick={() => setView("autopilot")}>Review signals -&gt;</button></section>}
+            {studioDocuments.length > 0 && <section className="studio-banner"><div><span className="studio-banner-mark">Aa</span><span><strong>{studioDocuments.length} tailored resume version{studioDocuments.length === 1 ? "" : "s"}</strong><small>{studioDocuments.filter((document) => document.status === "APPROVED").length} approved export{studioDocuments.filter((document) => document.status === "APPROVED").length === 1 ? "" : "s"} ready</small></span></div><button className="text-button" onClick={() => setView("studio")}>Open studio -&gt;</button></section>}
 
             <section className="metric-grid" aria-label="Job search metrics">
               <Metric label="Live roles" value={String(liveJobs.length)} note={latestDiscovery ? `${latestDiscovery.providers.length} discovery providers` : "Ready for discovery"} trend={liveJobs.length ? "up" : "neutral"} />
@@ -1082,10 +1166,12 @@ export function RoleSignalApp() {
               {packet.kit && <div className="kit-box"><div><span className="card-kicker">Reusable application kit</span><p>{packet.kit.summary}</p></div><div className="kit-answer"><strong>Why this role</strong><p>{packet.kit.whyAnswer}</p></div></div>}
               {packet.resumeStrategy.changes?.length ? <div className="packet-guidance"><strong>Recommended evidence order</strong><ul>{packet.resumeStrategy.changes.map((change) => <li key={change}>{change}</li>)}</ul></div> : null}
               {packet.blockers.length > 0 && <div className="blocker-box"><strong>Needs your input</strong>{packet.blockers.map((blocker) => <span key={blocker.id}>{blocker.question}</span>)}</div>}
-              <div className="packet-actions">{packet.kit && <button className="secondary-button" onClick={() => void copyApplicationKit(packet)}>Copy application kit</button>}<button className="secondary-button" onClick={() => void copyBrowserPacket(packet)}>Copy browser packet</button><button className="secondary-button" onClick={() => openApplication(packet)}>Open application</button><button className="primary-button" disabled={packet.blockers.length > 0 || packet.status === "APPROVED_FOR_FILL" || busy === `approve-${packet.id}`} onClick={() => void approvePacket(packet)}>{packet.status === "APPROVED_FOR_FILL" ? "Approved for fill" : "Approve for fill"}</button></div>
+              <div className="packet-actions"><button className="studio-button" disabled={busy === "studio-generate"} onClick={() => void openStudioForPacket(packet)}>Tailor resume</button>{packet.kit && <button className="secondary-button" onClick={() => void copyApplicationKit(packet)}>Copy application kit</button>}<button className="secondary-button" onClick={() => void copyBrowserPacket(packet)}>Copy browser packet</button><button className="secondary-button" onClick={() => openApplication(packet)}>Open application</button><button className="primary-button" disabled={packet.blockers.length > 0 || packet.status === "APPROVED_FOR_FILL" || busy === `approve-${packet.id}`} onClick={() => void approvePacket(packet)}>{packet.status === "APPROVED_FOR_FILL" ? "Approved for fill" : "Approve for fill"}</button></div>
             </article>)}</div>}
           </div>
         )}
+
+        {view === "studio" && <StudioView documents={studioDocuments} jobs={studioJobs} selectedId={selectedStudioId} busy={busy} onSelect={setSelectedStudioId} onGenerate={generateStudio} onSave={saveStudio} onApprove={approveStudio} onCopy={copyStudioText} />}
 
         {view === "profile" && (
           <div className="page inner-page">

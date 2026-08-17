@@ -243,3 +243,25 @@ export const jobAlerts = sqliteTable("job_alerts", {
   uniqueIndex("idx_job_alerts_user_job_kind").on(table.userId, table.jobId, table.kind),
   index("idx_job_alerts_user_status_created").on(table.userId, table.status, table.createdAt),
 ]);
+
+export const tailoredDocuments = sqliteTable("tailored_documents", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull(),
+  jobId: text("job_id").notNull(),
+  resumeId: text("resume_id"),
+  version: integer("version").notNull(),
+  status: text("status").notNull(),
+  title: text("title").notNull(),
+  contentJson: text("content_json").notNull(),
+  evidenceJson: text("evidence_json").notNull(),
+  groundingScore: integer("grounding_score").notNull(),
+  docxObjectKey: text("docx_object_key"),
+  pdfObjectKey: text("pdf_object_key"),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+  approvedAt: text("approved_at"),
+}, (table) => [
+  uniqueIndex("idx_tailored_documents_user_job_version").on(table.userId, table.jobId, table.version),
+  index("idx_tailored_documents_user_updated").on(table.userId, table.updatedAt),
+  index("idx_tailored_documents_user_job_status").on(table.userId, table.jobId, table.status),
+]);

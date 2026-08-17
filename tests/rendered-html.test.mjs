@@ -23,10 +23,12 @@ test("server-renders the RoleSignal product shell", async () => {
   assert.doesNotMatch(html, /Your site is taking shape|react-loading-skeleton/);
 });
 
-test("keeps Phase 5 automation, semantic matching, discovery, and safety contracts in source", async () => {
-  const [worker, app, schema, extension, popup, scoring, vite] = await Promise.all([
+test("keeps Phase 6 documents plus automation, discovery, and safety contracts in source", async () => {
+  const [worker, app, studioView, documents, schema, extension, popup, scoring, vite] = await Promise.all([
     readFile(new URL("../worker/index.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/rolesignal-app.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/studio-view.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../lib/application-studio.ts", import.meta.url), "utf8"),
     readFile(new URL("../db/schema.ts", import.meta.url), "utf8"),
     readFile(new URL("../browser-extension/content.js", import.meta.url), "utf8"),
     readFile(new URL("../browser-extension/popup.js", import.meta.url), "utf8"),
@@ -50,6 +52,12 @@ test("keeps Phase 5 automation, semantic matching, discovery, and safety contrac
   assert.match(worker, /\/api\/rolesignal\/sources\/remove/);
   assert.match(worker, /\/api\/rolesignal\/answers/);
   assert.match(worker, /\/api\/rolesignal\/applications\/kit/);
+  assert.match(worker, /\/api\/rolesignal\/studio\/generate/);
+  assert.match(worker, /\/api\/rolesignal\/studio\/documents/);
+  assert.match(worker, /\/api\/rolesignal\/studio\/approve/);
+  assert.match(worker, /\/api\/rolesignal\/studio\/download/);
+  assert.match(worker, /buildResumeDocx/);
+  assert.match(worker, /buildResumePdf/);
   assert.match(worker, /\/api\/rolesignal\/export\/ledger\.csv/);
   assert.match(worker, /\/api\/rolesignal\/export\/run\.md/);
   assert.match(worker, /autoStaged/);
@@ -63,6 +71,8 @@ test("keeps Phase 5 automation, semantic matching, discovery, and safety contrac
   assert.match(schema, /discoveryRuns/);
   assert.match(schema, /automationSettings/);
   assert.match(schema, /jobAlerts/);
+  assert.match(schema, /tailoredDocuments/);
+  assert.match(schema, /idx_tailored_documents_user_job_version/);
   assert.match(schema, /idx_job_matches_user_fingerprint/);
   assert.match(app, /extractText\(new Uint8Array/);
   assert.match(app, /extractRawText/);
@@ -73,6 +83,13 @@ test("keeps Phase 5 automation, semantic matching, discovery, and safety contrac
   assert.match(app, /Your job search keeps watch/);
   assert.match(app, /Signal inbox/);
   assert.match(app, /Deep-analyze JD/);
+  assert.match(app, /Tailored studio/);
+  assert.match(studioView, /Tailored Application Studio/);
+  assert.match(studioView, /Approve & generate files/);
+  assert.match(studioView, /Claim provenance/);
+  assert.match(documents, /validateStudioContent/);
+  assert.match(documents, /w:numPr/);
+  assert.match(documents, /%PDF-1\.4/);
   assert.match(scoring, /semanticCatalog/);
   assert.match(scoring, /Message-driven systems/);
   assert.match(vite, /crons:\s*\["0 \* \* \* \*"\]/);

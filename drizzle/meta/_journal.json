@@ -36,6 +36,13 @@
       "when": 1786910138886,
       "tag": "0004_adorable_vivisector",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1786986430167,
+      "tag": "0005_nifty_malice",
+      "breakpoints": true
     }
   ]
 }

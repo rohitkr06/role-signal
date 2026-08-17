@@ -340,7 +340,11 @@ export function scoreJob(profile: CandidateProfile, input: JobInput, now = new D
 export function profileFromResumeText(rawText: string, name = "Rohit Kumar", email = ""): CandidateProfile {
   const text = rawText.replace(/\r/g, "").replace(/[ \t]+/g, " ").trim();
   const lower = normalize(text);
-  const skills = skillCatalog.filter((skill) => lower.includes(normalize(skill)));
+  const skills = skillCatalog.filter((skill) => {
+    if (skill === "Go" || skill === "Golang") return /\b(?:go|golang)\b/.test(lower);
+    if (skill === "Java") return /\bjava\b/.test(lower);
+    return lower.includes(normalize(skill));
+  });
   const evidence = text
     .split(/\n+/)
     .map((line) => line.replace(/^[\s•·*-]+/, "").trim())
