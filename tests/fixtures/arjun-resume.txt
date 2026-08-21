@@ -1,0 +1,13 @@
+Arjun Mehta
+arjun.mehta@example.com
+Senior Java Backend Engineer
+
+5 years of professional experience building backend platforms.
+
+Skills
+Java, Spring Boot, SQL, PostgreSQL, Kafka, AWS, Docker, Kubernetes
+
+Experience
+- Built Spring Boot APIs processing 20 million monthly requests with 99.95% availability.
+- Designed Kafka event workflows that reduced settlement processing time by 40%.
+- Led a PostgreSQL performance program that reduced p95 query latency by 55%.

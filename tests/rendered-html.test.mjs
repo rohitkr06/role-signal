@@ -23,8 +23,8 @@ test("server-renders the RoleSignal product shell", async () => {
   assert.doesNotMatch(html, /Your site is taking shape|react-loading-skeleton/);
 });
 
-test("keeps Phase 7 execution plus documents, discovery, and safety contracts in source", async () => {
-  const [worker, app, executionView, executionPolicy, studioView, documents, schema, extension, background, popup, manifest, scoring, vite, migration] = await Promise.all([
+test("keeps trustworthy evidence, discovery, and guarded execution contracts in source", async () => {
+  const [worker, app, executionView, executionPolicy, studioView, documents, schema, extension, background, popup, manifest, scoring, vite, phase7Migration, phase8Migration, trustworthyMigration] = await Promise.all([
     readFile(new URL("../worker/index.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/rolesignal-app.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/execution-view.tsx", import.meta.url), "utf8"),
@@ -39,6 +39,8 @@ test("keeps Phase 7 execution plus documents, discovery, and safety contracts in
     readFile(new URL("../lib/rolesignal.ts", import.meta.url), "utf8"),
     readFile(new URL("../vite.config.ts", import.meta.url), "utf8"),
     readFile(new URL("../drizzle/0006_phase7_execution.sql", import.meta.url), "utf8"),
+    readFile(new URL("../drizzle/0007_phase8_unified_discovery.sql", import.meta.url), "utf8"),
+    readFile(new URL("../drizzle/0008_trustworthy_mvp.sql", import.meta.url), "utf8"),
   ]);
   assert.match(worker, /async scheduled/);
   assert.match(worker, /executeDueAutomations/);
@@ -49,9 +51,14 @@ test("keeps Phase 7 execution plus documents, discovery, and safety contracts in
   assert.match(worker, /posting-api\/job-board/);
   assert.match(worker, /\/api\/rolesignal\/discovery\/run/);
   assert.match(worker, /\/api\/rolesignal\/discovery\/capture/);
+  assert.match(worker, /\/api\/rolesignal\/discovery\/alerts/);
+  assert.match(worker, /\/api\/rolesignal\/inbound-email/);
   assert.match(worker, /\/api\/rolesignal\/export\/discovery-run\.md/);
   assert.match(worker, /api\/v2\/remote-jobs/);
   assert.match(worker, /api\/job-board-api/);
+  assert.match(worker, /api\.adzuna\.com\/v1\/api\/jobs\/in\/search/);
+  assert.match(worker, /jooble\.org\/api/);
+  assert.match(worker, /serpapi\.com\/search\.json/);
   assert.match(worker, /\/api\/rolesignal\/sources\/scan/);
   assert.match(worker, /\/api\/rolesignal\/sources\/scan-all/);
   assert.match(worker, /\/api\/rolesignal\/sources\/remove/);
@@ -73,6 +80,10 @@ test("keeps Phase 7 execution plus documents, discovery, and safety contracts in
   assert.match(worker, /\/api\/rolesignal\/export\/run\.md/);
   assert.match(worker, /autoStaged/);
   assert.match(worker, /\/api\/rolesignal\/applications\/approve/);
+  assert.match(worker, /\/api\/rolesignal\/profile\/confirm/);
+  assert.match(worker, /assertCurrentEvidence/);
+  assert.match(worker, /PENDING_REVIEW/);
+  assert.match(worker, /source_health/);
   assert.match(worker, /neverSubmit:\s*true/);
   assert.match(schema, /applicationPackets/);
   assert.match(schema, /answerVault/);
@@ -82,30 +93,39 @@ test("keeps Phase 7 execution plus documents, discovery, and safety contracts in
   assert.match(schema, /discoveryRuns/);
   assert.match(schema, /automationSettings/);
   assert.match(schema, /jobAlerts/);
+  assert.match(schema, /alertImports/);
   assert.match(schema, /tailoredDocuments/);
   assert.match(schema, /idx_tailored_documents_user_job_version/);
   assert.match(schema, /idx_job_matches_user_fingerprint/);
   assert.match(schema, /applicationExecutions/);
   assert.match(schema, /companionDevices/);
   assert.match(schema, /executionSettings/);
+  assert.match(schema, /careerProfileVersions/);
+  assert.match(schema, /sourceHealth/);
+  assert.match(schema, /activeProfileVersionId/);
+  assert.match(schema, /profileVersionId/);
   assert.match(app, /extractText\(new Uint8Array/);
   assert.match(app, /extractRawText/);
   assert.match(app, /Verified answer vault/);
   assert.match(app, /One run\. Every connected source/);
-  assert.match(app, /Market-wide discovery/);
-  assert.match(app, /Search beyond one company/);
+  assert.match(app, /Review before activating/);
+  assert.match(app, /Confirm profile first/);
+  assert.match(app, /No live matches yet/);
+  assert.match(app, /const displayJobs = liveJobs/);
+  assert.match(app, /One search\. The best India-focused sources\./);
+  assert.match(app, /Portal alert inbox/);
   assert.match(app, /Your job search keeps watch/);
   assert.match(app, /Signal inbox/);
   assert.match(app, /Deep-analyze JD/);
-  assert.match(app, /Tailored studio/);
-  assert.match(app, /Assisted apply/);
-  assert.match(executionView, /Let the qualified queue move while you work/);
-  assert.match(executionView, /Auto-submit compatible/);
+  assert.match(studioView, /Tailored application studio/i);
+  assert.match(executionView, /Guarded browser fill/i);
+  assert.match(executionView, /Move approved applications without losing control/);
+  assert.match(executionView, /Auto-submit is not enabled/);
   assert.match(executionPolicy, /boards\\\.greenhouse/);
   assert.match(executionPolicy, /jobs\\\.lever/);
   assert.match(executionPolicy, /jobs\\\.ashbyhq/);
   assert.match(worker, /neverBypassCaptcha/);
-  assert.match(studioView, /Tailored Application Studio/);
+  assert.match(studioView, /Tailored application studio/i);
   assert.match(studioView, /Approve & generate files/);
   assert.match(studioView, /Claim provenance/);
   assert.match(documents, /validateStudioContent/);
@@ -127,8 +147,18 @@ test("keeps Phase 7 execution plus documents, discovery, and safety contracts in
   assert.match(manifest, /"version": "0\.7\.0"/);
   assert.match(popup, /ROLE_SIGNAL_CAPTURE/);
   assert.match(popup, /ROLE_SIGNAL_RUN_NEXT/);
-  assert.match(migration, /CREATE TABLE `application_executions`/);
+  assert.match(phase7Migration, /CREATE TABLE `application_executions`/);
+  assert.match(phase8Migration, /CREATE TABLE `alert_imports`/);
+  assert.match(trustworthyMigration, /CREATE TABLE `career_profile_versions`/);
+  assert.match(trustworthyMigration, /CREATE TABLE `source_health`/);
+  assert.match(trustworthyMigration, /SET `status` = 'STALE'/);
   assert.match(extension, /allowAutoSubmit/);
   assert.doesNotMatch(extension, /requestSubmit|\.submit\(/);
   assert.doesNotMatch(popup, /requestSubmit|\.submit\(/);
+  assert.doesNotMatch(app, /sampleJobs|isSample/);
+  assert.doesNotMatch(app, /Phase 8/);
+  assert.doesNotMatch(executionView, /Auto-submit compatible/);
+  assert.doesNotMatch(executionPolicy, /return \"AUTO_SUBMIT\"/);
+  assert.doesNotMatch(worker, /SaaS Labs|JustCall|ROHIT_PROFILE/);
+  assert.doesNotMatch(scoring, /SaaS Labs|JustCall|ROHIT_PROFILE/);
 });

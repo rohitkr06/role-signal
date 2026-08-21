@@ -40,7 +40,6 @@ type MatchJob = {
   breakdown?: Record<string, number>;
   semanticMatches?: Array<{ requirement: string; evidence: string; confidence: "high" | "medium" }>;
   enrichedAt?: string;
-  isSample?: boolean;
 };
 
 type ApplicationPacket = {
@@ -159,8 +158,48 @@ type JobAlert = {
   readAt?: string;
 };
 
-type Workspace = {
+type DiscoverySource = {
+  id: string;
+  name: string;
+  lane: "PUBLIC_API" | "COMPANY_ATS" | "PORTAL_ALERTS" | "OPTIONAL_INDEX";
+  status: "LIVE" | "CONNECTED" | "READY" | "NEEDS_KEY" | "NEVER_TESTED" | "DEGRADED" | "UNAVAILABLE";
+  coverage: string;
+  note: string;
+  responseCount?: number;
+  acceptedCount?: number;
+  latencyMs?: number;
+  lastAttemptAt?: string;
+  lastSuccessAt?: string;
+  lastError?: string;
+};
+
+type ProfileVersion = {
+  id: string;
+  resumeId?: string | null;
+  version: number;
+  status: string;
   profile: Profile;
+  createdAt: string;
+};
+
+type AlertImport = {
+  id: string;
+  provider: string;
+  subject: string;
+  status: string;
+  jobsFound: number;
+  imported: number;
+  duplicates: number;
+  createdAt: string;
+};
+
+type Workspace = {
+  user?: { id: string; email: string; name: string };
+  profile: Profile;
+  profileStatus: "EMPTY" | "PENDING_REVIEW" | "VERIFIED";
+  activeProfileVersionId?: string | null;
+  activeResumeId?: string | null;
+  pendingProfileVersion?: ProfileVersion | null;
   jobs: MatchJob[];
   packets: ApplicationPacket[];
   sources: Array<{ id: string; provider: string; source_token: string; label: string; last_scanned_at?: string }>;
@@ -170,8 +209,10 @@ type Workspace = {
   searchRuns: SearchRun[];
   discoverySearches: DiscoverySearch[];
   discoveryRuns: DiscoveryRun[];
+  discoverySources: DiscoverySource[];
   automation?: AutomationSettings | null;
   alerts: JobAlert[];
+  alertImports: AlertImport[];
   studioDocuments: StudioDocument[];
   executionSettings: ExecutionSettings;
   companionDevices: CompanionDevice[];
@@ -189,88 +230,15 @@ type ScanReport = {
   skipped: number;
 };
 
-const sampleJobs: MatchJob[] = [
-  {
-    id: "sample-onehouse",
-    company: "Onehouse",
-    role: "Backend Engineer - Distributed Systems",
-    location: "Bengaluru",
-    workMode: "Hybrid",
-    platform: "Lever",
-    applicationUrl: "",
-    postedDate: "3d ago",
-    description: "Curated product sample",
-    score: 88,
-    classification: "Strong",
-    status: "HIGH_PRIORITY",
-    matchingExperience: ["Distributed services, Kubernetes and GCP", "Caching and production ownership"],
-    missingRequirements: ["gRPC"],
-    languageMismatch: ["Java / Spring"],
-    redFlags: [],
-    highPriority: true,
-    resumeFit: "CUSTOMIZE",
-    resumeChanges: ["Move Pub/Sub and Redis evidence higher."],
-    isSample: true,
-  },
-  {
-    id: "sample-sarvam",
-    company: "Sarvam",
-    role: "AI Backend Engineer",
-    location: "Bengaluru",
-    workMode: "On-site",
-    platform: "Ashby",
-    applicationUrl: "",
-    postedDate: "6h ago",
-    description: "Curated product sample",
-    score: 86,
-    classification: "Strong",
-    status: "HIGH_PRIORITY",
-    matchingExperience: ["AI voice orchestration", "Queues, Redis and failure handling"],
-    missingRequirements: ["Vector databases"],
-    languageMismatch: ["Python"],
-    redFlags: [],
-    highPriority: true,
-    resumeFit: "CUSTOMIZE",
-    resumeChanges: ["Lead with AIVA scale and production AI integrations."],
-    isSample: true,
-  },
-  {
-    id: "sample-learntube",
-    company: "LearnTube.ai",
-    role: "Backend Engineer, AI Platform",
-    location: "India",
-    workMode: "Remote",
-    platform: "Company site",
-    applicationUrl: "",
-    postedDate: "1d ago",
-    description: "Curated product sample",
-    score: 82,
-    classification: "Strong",
-    status: "READY_TO_APPLY",
-    matchingExperience: ["MongoDB, Redis, GCP and observability"],
-    missingRequirements: ["FastAPI"],
-    languageMismatch: ["Python"],
-    redFlags: [],
-    highPriority: false,
-    resumeFit: "CUSTOMIZE",
-    resumeChanges: ["Keep transferable backend architecture prominent."],
-    isSample: true,
-  },
-];
-
 const fallbackProfile: Profile = {
-  name: "Rohit Kumar",
+  name: "",
   email: "",
-  title: "Software Development Engineer II",
-  experienceYears: 3,
-  source: "verified-brief",
-  skills: ["TypeScript", "Node.js", "NestJS", "Distributed systems", "GCP", "Kubernetes", "Redis", "MySQL", "MongoDB", "OpenAI"],
-  domains: ["AI voice agents", "Event-driven architecture", "Production reliability"],
-  evidence: [
-    "Scaled an AI voice platform to 7,000+ customers and roughly 5,000 calls per day.",
-    "Led a zero-downtime MySQL migration spanning 100M+ rows.",
-    "Reduced database load by roughly 60% with Redis configuration caching.",
-  ],
+  title: "",
+  experienceYears: 0,
+  source: "resume",
+  skills: [],
+  domains: [],
+  evidence: [],
 };
 
 const defaultExecutionSettings: ExecutionSettings = {
@@ -284,14 +252,8 @@ const defaultExecutionSettings: ExecutionSettings = {
 const navItems: Array<{ id: View; label: string; mark: string }> = [
   { id: "dashboard", label: "Overview", mark: "01" },
   { id: "discovery", label: "Discover jobs", mark: "02" },
-  { id: "matches", label: "Matches", mark: "03" },
-  { id: "sources", label: "Company boards", mark: "04" },
-  { id: "runs", label: "ATS runs", mark: "05" },
-  { id: "autopilot", label: "Automation", mark: "06" },
-  { id: "applications", label: "Applications", mark: "07" },
-  { id: "studio", label: "Tailored studio", mark: "08" },
-  { id: "execution", label: "Assisted apply", mark: "09" },
-  { id: "profile", label: "Career profile", mark: "10" },
+  { id: "applications", label: "Applications", mark: "03" },
+  { id: "profile", label: "Profile & settings", mark: "04" },
 ];
 
 const answerFields = [
@@ -327,13 +289,19 @@ function postedLabel(value?: string) {
 export function RoleSignalApp() {
   const [view, setView] = useState<View>("dashboard");
   const [profile, setProfile] = useState<Profile>(fallbackProfile);
+  const [profileStatus, setProfileStatus] = useState<Workspace["profileStatus"]>("EMPTY");
+  const [activeProfileVersionId, setActiveProfileVersionId] = useState("");
+  const [pendingProfile, setPendingProfile] = useState<ProfileVersion | null>(null);
+  const [accountName, setAccountName] = useState("RoleSignal user");
   const [liveJobs, setLiveJobs] = useState<MatchJob[]>([]);
   const [packets, setPackets] = useState<ApplicationPacket[]>([]);
   const [sources, setSources] = useState<Workspace["sources"]>([]);
   const [searchRuns, setSearchRuns] = useState<SearchRun[]>([]);
   const [discoveryRuns, setDiscoveryRuns] = useState<DiscoveryRun[]>([]);
+  const [discoverySources, setDiscoverySources] = useState<DiscoverySource[]>([]);
   const [automation, setAutomation] = useState<AutomationSettings | null>(null);
   const [alerts, setAlerts] = useState<JobAlert[]>([]);
+  const [alertImports, setAlertImports] = useState<AlertImport[]>([]);
   const [studioDocuments, setStudioDocuments] = useState<StudioDocument[]>([]);
   const [selectedStudioId, setSelectedStudioId] = useState("");
   const [executionSettings, setExecutionSettings] = useState<ExecutionSettings>(defaultExecutionSettings);
@@ -355,7 +323,7 @@ export function RoleSignalApp() {
   const [autoApply, setAutoApply] = useState(false);
   const [threshold, setThreshold] = useState(75);
   const [dailyLimit, setDailyLimit] = useState(5);
-  const [resumeName, setResumeName] = useState("Rohit_Kumar_Backend_Engineer.pdf");
+  const [resumeName, setResumeName] = useState("No resume uploaded");
   const [uploadState, setUploadState] = useState<"idle" | "extracting" | "uploading" | "saved" | "error">("idle");
   const [resumeText, setResumeText] = useState("");
   const [toast, setToast] = useState("");
@@ -371,20 +339,25 @@ export function RoleSignalApp() {
     workModes: ["Remote", "Hybrid"],
     minScore: 75,
   });
-  const [captureText, setCaptureText] = useState("");
+  const [alertForm, setAlertForm] = useState({ provider: "LinkedIn", subject: "", content: "" });
+  const [alertFeedback, setAlertFeedback] = useState<{ tone: "success" | "error"; message: string } | null>(null);
   const [scheduleEnabled, setScheduleEnabled] = useState(false);
   const [cadenceHours, setCadenceHours] = useState(24);
   const [alertThreshold, setAlertThreshold] = useState(82);
   const [browserAlerts, setBrowserAlerts] = useState(true);
   const fileInput = useRef<HTMLInputElement>(null);
 
-  const displayJobs = liveJobs.length ? liveJobs : sampleJobs;
+  const displayJobs = liveJobs;
   const qualifiedJobs = useMemo(() => liveJobs.filter((job) => job.score >= threshold && job.status !== "SKIPPED"), [liveJobs, threshold]);
   const needsAttention = packets.filter((packet) => packet.status === "NEEDS_INPUT").length;
   const latestRun = searchRuns[0];
   const latestDiscovery = discoveryRuns[0];
   const unreadAlerts = alerts.filter((alert) => alert.status === "UNREAD");
-  const studioJobs = liveJobs.filter((job) => job.score >= 75 && job.status !== "SKIPPED" && !job.isSample);
+  const activeDiscoverySources = discoverySources.filter((source) => source.status === "LIVE");
+  const latestAlertImport = alertImports[0];
+  const approvedQueueCount = packets.filter((packet) => packet.status === "APPROVED_FOR_FILL").length;
+  const profileInitials = (profile.name || accountName).split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase() || "RS";
+  const studioJobs = liveJobs.filter((job) => job.score >= 75 && job.status !== "SKIPPED");
   const primaryKeyword = discoveryForm.keywords.split(",")[0]?.trim() || "Backend Engineer";
   const primaryLocation = discoveryForm.locations.split(",")[0]?.trim() || "India";
   const portalSearches = [
@@ -423,13 +396,19 @@ export function RoleSignalApp() {
     try {
       const data = await api<Workspace>("/api/rolesignal/workspace");
       setProfile(data.profile || fallbackProfile);
+      setProfileStatus(data.profileStatus || "EMPTY");
+      setActiveProfileVersionId(data.activeProfileVersionId || "");
+      setPendingProfile(data.pendingProfileVersion || null);
+      setAccountName(data.profile?.name || data.user?.name || "RoleSignal user");
       setLiveJobs(data.jobs || []);
       setPackets(data.packets || []);
       setSources(data.sources || []);
       setSearchRuns(data.searchRuns || []);
       setDiscoveryRuns(data.discoveryRuns || []);
+      setDiscoverySources(data.discoverySources || []);
       setAutomation(data.automation || null);
       setAlerts(data.alerts || []);
+      setAlertImports(data.alertImports || []);
       setStudioDocuments(data.studioDocuments || []);
       setExecutionSettings(data.executionSettings || defaultExecutionSettings);
       setCompanionDevices(data.companionDevices || []);
@@ -456,14 +435,14 @@ export function RoleSignalApp() {
         ...current,
         ...Object.fromEntries((data.answerVault || []).map((row) => [row.field_key, row.value])),
       }));
-      if (data.resumes?.[0]) setResumeName(data.resumes[0].filename);
+      setResumeName(data.resumes?.[0]?.filename || "No resume uploaded");
       if (data.preferences) {
         setThreshold(Number(data.preferences.match_threshold ?? 75));
         setDailyLimit(Number(data.preferences.daily_limit ?? 5));
         setAutoApply(Boolean(data.preferences.auto_apply));
       }
     } catch {
-      setToast("The workspace could not sync. The interface is showing curated samples.");
+      setToast("The workspace could not sync. Retry before continuing.");
     } finally {
       setWorkspaceLoaded(true);
     }
@@ -494,13 +473,15 @@ export function RoleSignalApp() {
       const data = new FormData();
       data.append("resume", file);
       data.append("resumeText", text.slice(0, 200_000));
-      const result = await api<{ profile?: Profile }>("/api/rolesignal/resumes", { method: "POST", body: data });
+      const result = await api<{ profileVersion: ProfileVersion }>("/api/rolesignal/resumes", { method: "POST", body: data });
       setResumeName(file.name);
-      if (result.profile) setProfile(result.profile);
+      setPendingProfile(result.profileVersion);
+      setProfileStatus("PENDING_REVIEW");
       setResumeText(text);
       setUploadState("saved");
-      setToast("Resume analyzed. Verified signals now drive every score.");
+      setToast("Resume analyzed. Review the extracted profile before it can affect matching or applications.");
       await loadWorkspace();
+      setView("profile");
     } catch (error) {
       setUploadState("error");
       setToast(error instanceof Error ? error.message : "Resume analysis failed.");
@@ -510,15 +491,38 @@ export function RoleSignalApp() {
   async function analyzePastedResume() {
     setBusy("resume-text");
     try {
-      const result = await api<{ profile: Profile }>("/api/rolesignal/profile/analyze", {
+      const result = await api<{ profileVersion: ProfileVersion }>("/api/rolesignal/profile/analyze", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ resumeText }),
       });
-      setProfile(result.profile);
-      setToast("Resume text analyzed and saved as the current source of truth.");
+      setPendingProfile(result.profileVersion);
+      setProfileStatus("PENDING_REVIEW");
+      setToast("Resume text analyzed. Review and confirm it before matching begins.");
     } catch (error) {
       setToast(error instanceof Error ? error.message : "Resume text could not be analyzed.");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function confirmPendingProfile() {
+    if (!pendingProfile) return;
+    setBusy("profile-confirm");
+    try {
+      const result = await api<{ profile: Profile; activeProfileVersionId: string }>("/api/rolesignal/profile/confirm", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ profileVersionId: pendingProfile.id, profile: pendingProfile.profile }),
+      });
+      setProfile(result.profile);
+      setActiveProfileVersionId(result.activeProfileVersionId);
+      setPendingProfile(null);
+      setProfileStatus("VERIFIED");
+      setToast("Profile confirmed. New discovery and applications will use only this evidence version.");
+      await loadWorkspace();
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "The profile could not be confirmed.");
     } finally {
       setBusy("");
     }
@@ -553,7 +557,7 @@ export function RoleSignalApp() {
         body: JSON.stringify(settings),
       });
       setExecutionSettings(result.settings);
-      setToast(settings.enabled ? "Phase 7 execution is active." : "Phase 7 execution is paused.");
+      setToast(settings.enabled ? "The guarded apply runner is active." : "The guarded apply runner is paused.");
     } catch (error) {
       setToast(error instanceof Error ? error.message : "Execution settings could not be saved.");
     } finally {
@@ -583,7 +587,7 @@ export function RoleSignalApp() {
         body: JSON.stringify({ jobId }),
       });
       await loadWorkspace();
-      setToast("Application added to the Phase 7 execution ledger.");
+      setToast("Application added to the guarded execution ledger.");
       setView("execution");
     } catch (error) {
       setToast(error instanceof Error ? error.message : "The application could not be queued.");
@@ -677,10 +681,23 @@ export function RoleSignalApp() {
     event.preventDefault();
     setBusy("source-scan");
     try {
+      let provider = sourceForm.provider;
+      let token = sourceForm.token.trim();
+      if (/^https?:\/\//i.test(token)) {
+        const boardUrl = new URL(token);
+        const host = boardUrl.hostname.toLowerCase();
+        const pathToken = boardUrl.pathname.split("/").filter(Boolean)[0] || "";
+        if (host.includes("greenhouse")) provider = "greenhouse";
+        else if (host === "jobs.lever.co") provider = "lever";
+        else if (host === "jobs.ashbyhq.com") provider = "ashby";
+        else throw new Error("Use a Greenhouse, Lever or Ashby careers URL.");
+        token = pathToken;
+      }
+      if (!token) throw new Error("Enter a company careers URL or board token.");
       const result = await api<{ report: ScanReport }>("/api/rolesignal/sources/scan", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(sourceForm),
+        body: JSON.stringify({ ...sourceForm, provider, token }),
       });
       setScanReport(result.report);
       setToast(`Scored ${result.report.discovered} published roles from ${result.report.source}.`);
@@ -735,7 +752,7 @@ export function RoleSignalApp() {
           ...discoveryForm,
           keywords: discoveryForm.keywords.split(",").map((value) => value.trim()).filter(Boolean),
           locations: discoveryForm.locations.split(",").map((value) => value.trim()).filter(Boolean),
-          portals: ["Jobicy", "Arbeitnow", "Connected ATS boards"],
+          portals: ["Public APIs", "Official company boards", "Portal alert inbox"],
         }),
       });
       await loadWorkspace();
@@ -748,32 +765,44 @@ export function RoleSignalApp() {
     }
   }
 
-  async function importPortalCapture(event: FormEvent) {
+  async function importJobAlert(event: FormEvent) {
     event.preventDefault();
-    setBusy("capture-import");
+    setBusy("alert-import");
+    setAlertFeedback(null);
     try {
-      const batch = JSON.parse(captureText) as Record<string, unknown>;
-      const result = await api<{ run: DiscoveryRun }>("/api/rolesignal/discovery/capture", {
+      const result = await api<{ duplicate: boolean; run: DiscoveryRun | null; alertImport: AlertImport }>("/api/rolesignal/discovery/alerts", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ batch }),
+        body: JSON.stringify(alertForm),
       });
-      setCaptureText("");
       await loadWorkspace();
-      setToast(`Imported ${result.run.imported} new portal jobs; ${result.run.duplicates} duplicates were merged.`);
+      if (result.duplicate) {
+        const message = "Already imported: no duplicate jobs were created.";
+        setAlertFeedback({ tone: "success", message });
+        setToast(message);
+      } else {
+        setAlertForm((current) => ({ ...current, subject: "", content: "" }));
+        const message = `Parsed ${result.alertImport.jobsFound} links: ${result.alertImport.imported} new, ${result.alertImport.duplicates} duplicates, ${result.run?.qualified || 0} qualified.`;
+        setAlertFeedback({ tone: "success", message });
+        setToast(message);
+      }
     } catch (error) {
-      setToast(error instanceof Error ? error.message : "The portal capture could not be imported.");
+      const message = error instanceof Error ? error.message : "The job alert could not be imported.";
+      setAlertFeedback({ tone: "error", message });
+      setToast(message);
     } finally {
       setBusy("");
     }
   }
 
-  async function pasteCapture() {
+  async function pasteJobAlert() {
     try {
-      setCaptureText(await navigator.clipboard.readText());
-      setToast("Discovery batch pasted from the browser companion.");
+      setAlertForm((current) => ({ ...current, content: "" }));
+      const content = await navigator.clipboard.readText();
+      setAlertForm((current) => ({ ...current, content }));
+      setToast("Job alert pasted and ready to process.");
     } catch {
-      setToast("Clipboard access was blocked. Paste the discovery batch manually.");
+      setToast("Clipboard access was blocked. Paste the alert email manually.");
     }
   }
 
@@ -837,10 +866,6 @@ export function RoleSignalApp() {
   }
 
   async function deepAnalyze(job: MatchJob) {
-    if (job.isSample) {
-      setToast("Import a live job before running full-description analysis.");
-      return;
-    }
     setBusy(`enrich-${job.id}`);
     try {
       await api("/api/rolesignal/jobs/enrich", {
@@ -876,11 +901,6 @@ export function RoleSignalApp() {
   }
 
   async function prepareApplication(job: MatchJob) {
-    if (job.isSample) {
-      setView("sources");
-      setToast("Connect a live source or import a job before preparing an application.");
-      return;
-    }
     setBusy(`prepare-${job.id}`);
     try {
       await api("/api/rolesignal/applications/prepare", {
@@ -1041,7 +1061,7 @@ export function RoleSignalApp() {
         <div className="workspace-switcher">
           <span className="workspace-avatar">RK</span>
           <span><strong>{profile.name}</strong><small>{profile.title}</small></span>
-          <b>v7</b>
+          <b>v8</b>
         </div>
         <nav aria-label="Primary navigation">
           <p className="nav-label">Workspace</p>
@@ -1060,7 +1080,7 @@ export function RoleSignalApp() {
         <div className="sidebar-bottom">
           <div className="autopilot-mini">
             <span className="pulse-dot" />
-            <div><strong>{executionSettings.enabled ? "Phase 7 execution is on" : autoApply ? "Auto-stage is on" : "Review mode is on"}</strong><small>{executionSettings.mode === "AUTO_SUBMIT" ? "Compatible ATS forms may submit" : "Browser fill pauses before submit"}</small></div>
+            <div><strong>{executionSettings.enabled ? "Apply runner is on" : autoApply ? "Auto-stage is on" : "Review mode is on"}</strong><small>Browser fill always pauses before submit</small></div>
             <button className={autoApply ? "switch on" : "switch"} onClick={() => { const next = !autoApply; setAutoApply(next); void saveRules(next); }} aria-label="Toggle auto-stage"><span /></button>
           </div>
           <a className="help-link" href="/rolesignal-browser-companion.zip" download><span>+</span> Browser companion</a>
@@ -1074,10 +1094,9 @@ export function RoleSignalApp() {
             {navItems.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
           </select>
           <div className="top-actions">
-            <span className="secure-pill"><i /> Evidence-locked</span>
+            <span className="secure-pill"><i />{profileStatus === "VERIFIED" ? "Evidence verified" : "Profile setup"}</span>
             <button className="signal-inbox-button" onClick={() => setView("autopilot")}><span>{unreadAlerts.length}</span> Signals</button>
-            <span className="phase-pill">Phase 7</span>
-            <button className="avatar-button" aria-label="Career profile">RK</button>
+            <button className="avatar-button" aria-label="Career profile" onClick={() => setView("profile")}>{profileInitials}</button>
           </div>
         </header>
 
@@ -1085,11 +1104,11 @@ export function RoleSignalApp() {
           <div className="page dashboard-page">
             <section className="hero-row">
               <div>
-                <span className="eyebrow">Cross-portal discovery workspace</span>
+                <span className="eyebrow">Unified India-focused job search</span>
                 <h1>Find work worth applying for.</h1>
-                <p>{liveJobs.length ? `${liveJobs.length} roles from public feeds, company boards and portal captures have been scored against verified engineering evidence.` : "Run discovery across public feeds, company boards and browser-assisted job portals."}</p>
+                <p>{liveJobs.length ? `${liveJobs.length} roles from job APIs, official company boards and portal alerts have been scored against verified engineering evidence.` : "Search India-focused feeds, company career boards and portal alerts from one place."}</p>
               </div>
-              <button className="primary-button" disabled={busy === "discovery-run"} onClick={() => void runDiscovery()}><span>&#8599;</span>{busy === "discovery-run" ? "Searching feeds..." : "Discover matching jobs"}</button>
+              <button className="primary-button" disabled={busy === "discovery-run" || profileStatus !== "VERIFIED"} onClick={() => void runDiscovery()}><span>&#8599;</span>{profileStatus !== "VERIFIED" ? "Confirm profile first" : busy === "discovery-run" ? "Searching feeds..." : "Discover matching jobs"}</button>
             </section>
 
             {latestDiscovery && <section className="latest-run-strip discovery-strip"><div><span className={`run-status ${latestDiscovery.status.toLowerCase()}`}>{readableStatus(latestDiscovery.status)}</span><span><strong>Latest cross-portal discovery</strong><small>{latestDiscovery.discovered} listings checked / {latestDiscovery.imported} new / {latestDiscovery.qualified} qualified / {postedLabel(latestDiscovery.completedAt || latestDiscovery.startedAt)}</small></span></div><button className="text-button" onClick={() => setView("discovery")}>Open discovery -&gt;</button></section>}
@@ -1104,31 +1123,29 @@ export function RoleSignalApp() {
               <Metric label="Needs attention" value={String(needsAttention)} note="Unknown required answers" trend={needsAttention ? "warn" : "up"} />
             </section>
 
-            {!liveJobs.length && workspaceLoaded && (
+            {profileStatus !== "VERIFIED" && workspaceLoaded && (
               <section className="setup-banner">
-                <div><span className="card-kicker">Curated preview</span><h3>Your discovery engine is ready.</h3><p>The roles below demonstrate scoring. Run public discovery or capture a signed-in LinkedIn, Naukri, Workday, or Indeed results page.</p></div>
-                <button className="secondary-button" onClick={() => setView("discovery")}>Open discovery</button>
+                <div><span className="card-kicker">Required before matching</span><h3>{pendingProfile ? "Review the resume we extracted." : "Start with your resume."}</h3><p>RoleSignal will not score, tailor, fill or queue anything until you confirm the identity and evidence it extracted.</p></div>
+                <button className="secondary-button" onClick={() => setView("profile")}>{pendingProfile ? "Review profile" : "Upload resume"}</button>
               </section>
             )}
 
             <section className="content-grid">
               <div className="opportunities-column">
                 <div className="section-heading">
-                  <div><span className="eyebrow">Ranked for you</span><h2>{liveJobs.length ? "Highest-signal opportunities" : "What a strong match looks like"}</h2></div>
+                  <div><span className="eyebrow">Ranked for you</span><h2>{liveJobs.length ? "Highest-signal opportunities" : "No live matches yet"}</h2></div>
                   <button className="text-button" onClick={() => setView("matches")}>View all matches -&gt;</button>
                 </div>
-                <div className="job-stack">
-                  {displayJobs.slice(0, 3).map((job) => <JobCard key={job.id} job={job} onReview={() => void prepareApplication(job)} busy={busy === `prepare-${job.id}`} />)}
-                </div>
+                <div className="job-stack">{displayJobs.length ? displayJobs.slice(0, 3).map((job) => <JobCard key={job.id} job={job} onReview={() => void prepareApplication(job)} busy={busy === `prepare-${job.id}`} />) : <EmptyState title="Your real matches will appear here" copy={profileStatus === "VERIFIED" ? "Run discovery to fetch, deduplicate and score current jobs." : "Confirm your resume profile to unlock discovery."} action={profileStatus === "VERIFIED" ? "Open discovery" : "Review profile"} onAction={() => setView(profileStatus === "VERIFIED" ? "discovery" : "profile")} />}</div>
               </div>
               <aside className="insights-column">
                 <ResumePanel resumeName={resumeName} state={uploadState} onChoose={() => fileInput.current?.click()} />
-                <div className="insight-card differentiation-card">
+                {profileStatus === "VERIFIED" && <div className="insight-card differentiation-card">
                   <span className="card-kicker">Your differentiator</span>
-                  <h3>AI voice + distributed backend</h3>
-                  <p>Scores translate queues, caching, scale and production ownership into equivalent JD requirements. Language mismatch stays separate from engineering mismatch.</p>
+                  <h3>{profile.domains.slice(0, 2).join(" + ") || profile.title}</h3>
+                  <p>{profile.evidence[0] || "Only evidence confirmed from your active resume is used in match explanations."}</p>
                   <div className="signal-bars"><span style={{ width: "92%" }} /><span style={{ width: "76%" }} /><span style={{ width: "87%" }} /></div>
-                </div>
+                </div>}
                 <div className="insight-card preference-card">
                   <div className="card-heading"><span className="card-kicker">Safety posture</span><button onClick={() => setView("autopilot")}>Edit</button></div>
                   <PreferenceRow label="Preparation" value={autoApply ? "Auto-stage" : "Manual"} />
@@ -1143,36 +1160,41 @@ export function RoleSignalApp() {
 
         {view === "discovery" && (
           <div className="page inner-page discovery-page">
-            <PageTitle eyebrow="Market-wide discovery" title="Search beyond one company" copy="Combine broad public feeds, connected company boards and jobs captured from your signed-in portal searches. Every listing enters the same resume-scoring pipeline." action={busy === "discovery-run" ? "Searching feeds..." : "Run public discovery"} actionDisabled={busy === "discovery-run"} onAction={() => void runDiscovery()} />
+            <PageTitle eyebrow="Unified discovery" title="One search. The best India-focused sources." copy="RoleSignal checks verified job APIs, official company boards and portal alerts, then removes duplicates and ranks every opportunity against your active resume evidence." action={profileStatus !== "VERIFIED" ? "Confirm profile first" : busy === "discovery-run" ? "Searching every source..." : "Find my best matches"} actionDisabled={busy === "discovery-run" || profileStatus !== "VERIFIED"} onAction={() => void runDiscovery()} />
 
             <section className="discovery-hero-grid">
               <form className="discovery-config-card" onSubmit={runDiscovery}>
-                <div className="card-heading"><div><span className="card-kicker">Saved search profile</span><h2>What should RoleSignal hunt for?</h2></div><span className="verified-tag">Resume-linked</span></div>
+                <div className="card-heading"><div><span className="card-kicker">Your search profile</span><h2>Tell us what good looks like</h2></div><span className="verified-tag">Resume-linked</span></div>
                 <label>Search name<input value={discoveryForm.name} onChange={(event) => setDiscoveryForm({ ...discoveryForm, name: event.target.value })} /></label>
-                <label>Target roles and technologies<input value={discoveryForm.keywords} onChange={(event) => setDiscoveryForm({ ...discoveryForm, keywords: event.target.value })} placeholder="Backend Engineer, Platform Engineer, Node.js" /><small>Separate targets with commas.</small></label>
-                <label>Locations<input value={discoveryForm.locations} onChange={(event) => setDiscoveryForm({ ...discoveryForm, locations: event.target.value })} placeholder="India, Remote, APAC" /></label>
+                <label>Roles and technologies<input value={discoveryForm.keywords} onChange={(event) => setDiscoveryForm({ ...discoveryForm, keywords: event.target.value })} placeholder="Backend Engineer, Platform Engineer, Node.js" /><small>RoleSignal searches all connected sources with these terms.</small></label>
+                <label>Locations<input value={discoveryForm.locations} onChange={(event) => setDiscoveryForm({ ...discoveryForm, locations: event.target.value })} placeholder="India, Bengaluru, Remote" /></label>
                 <div className="discovery-controls"><label>Minimum match<input type="number" min={65} max={95} value={discoveryForm.minScore} onChange={(event) => setDiscoveryForm({ ...discoveryForm, minScore: Number(event.target.value) })} /></label><div><span>Work modes</span><div className="mode-pills">{["Remote", "Hybrid", "On-site"].map((mode) => <button type="button" key={mode} className={discoveryForm.workModes.includes(mode) ? "active" : ""} onClick={() => setDiscoveryForm({ ...discoveryForm, workModes: discoveryForm.workModes.includes(mode) ? discoveryForm.workModes.filter((value) => value !== mode) : [...discoveryForm.workModes, mode] })}>{mode}</button>)}</div></div></div>
-                <button className="primary-button wide" disabled={busy === "discovery-run"}>{busy === "discovery-run" ? "Fetching, deduplicating and scoring..." : "Search public feeds and company boards"}</button>
-                <p className="refresh-note">Public feeds refresh at most once per hour. Existing results are reused between refreshes.</p>
+                <button className="primary-button wide" disabled={busy === "discovery-run"}>{busy === "discovery-run" ? "Fetching, deduplicating and scoring..." : "Find and rank matching jobs"}</button>
+                <p className="refresh-note">One click checks every connected automatic source. Results are cached for one hour.</p>
               </form>
 
-              <aside className="coverage-card">
-                <span className="card-kicker">Coverage map</span><h2>Three discovery lanes</h2><p>No single API covers the whole job market. RoleSignal combines the reliable paths without bypassing logins or bot protection.</p>
-                <div className="coverage-row"><span className="coverage-mark public">01</span><span><strong>Public job feeds</strong><small>Jobicy remote roles + Arbeitnow aggregated ATS listings</small></span><b>Automatic</b></div>
-                <div className="coverage-row"><span className="coverage-mark ats">02</span><span><strong>Company ATS boards</strong><small>{sources.length ? `${sources.length} Greenhouse / Lever / Ashby boards connected` : "Connect Greenhouse, Lever or Ashby boards"}</small></span><b>Automatic</b></div>
-                <div className="coverage-row"><span className="coverage-mark portal">03</span><span><strong>Signed-in portals</strong><small>Ten major job portals via companion capture</small></span><b>Assisted</b></div>
-                <a className="download-button" href="/rolesignal-browser-companion.zip" download>Download Discovery Companion v0.7</a>
+              <aside className="coverage-card phase8-coverage">
+                <span className="card-kicker">Discovery status</span><h2>{activeDiscoverySources.length} sources ready now</h2><p>Protected portals stay outside RoleSignal. Their official alerts flow into the same scoring pipeline without storing portal passwords.</p>
+                <div className="coverage-stat"><strong>{activeDiscoverySources.length}</strong><span>automatic<br />sources</span></div>
+                <div className="coverage-row"><span className="coverage-mark public">01</span><span><strong>India-wide APIs</strong><small>Adzuna and Jooble join the public feeds when keys are connected</small></span><b>Automatic</b></div>
+                <div className="coverage-row"><span className="coverage-mark ats">02</span><span><strong>Official career boards</strong><small>{sources.length ? `${sources.length} employer boards connected` : "Ready for your target-employer list"}</small></span><b>Automatic</b></div>
+                <div className="coverage-row"><span className="coverage-mark portal">03</span><span><strong>Portal alert inbox</strong><small>LinkedIn, Naukri, Indeed and Foundit alert emails</small></span><b>Safe import</b></div>
               </aside>
             </section>
 
-            <section className="portal-search-section">
-              <div className="section-heading"><div><span className="eyebrow">Authenticated portal searches</span><h2>Launch your search, then capture visible jobs</h2></div><span className="quiet-label">Your login stays in your browser</span></div>
-              <div className="portal-grid">{portalSearches.map((portal) => <a key={portal.name} href={portal.url} target="_blank" rel="noreferrer"><span className="portal-mark">{portal.mark}</span><span><strong>{portal.name}</strong><small>{portal.note}</small></span><b>-&gt;</b></a>)}<div className="portal-info"><span className="portal-mark">W</span><span><strong>Workday</strong><small>Open a company&apos;s Workday careers page</small></span><b>Per company</b></div></div>
+            <section className="source-health-section">
+              <div className="section-heading"><div><span className="eyebrow">Source health</span><h2>Exactly where your jobs come from</h2></div><span className="quiet-label">No hidden crawling</span></div>
+              <div className="source-health-grid">{discoverySources.map((source) => <article key={source.id} className="source-health-card"><div><span className={`source-health-dot ${source.status.toLowerCase()}`} /><span className="card-kicker">{readableStatus(source.lane)}</span></div><h3>{source.name}</h3><p>{source.coverage}</p><footer><span>{source.note}{source.lastAttemptAt ? <small>Last checked {postedLabel(source.lastAttemptAt)}{source.latencyMs ? ` / ${source.latencyMs}ms` : ""}</small> : null}</span><b className={source.status.toLowerCase()}>{readableStatus(source.status)}</b></footer></article>)}</div>
             </section>
 
-            <section className="capture-workflow">
-              <div className="capture-instructions"><span className="card-kicker">Browser-assisted capture</span><h2>Bring signed-in results into RoleSignal</h2><ol><li><b>1</b><span>Open a results page on any supported portal.</span></li><li><b>2</b><span>Open the RoleSignal companion and choose <strong>Capture visible jobs</strong>.</span></li><li><b>3</b><span>Paste the copied discovery batch here and import it.</span></li></ol><p>The companion reads only the job cards visible in your active tab. It does not crawl hidden pages, bypass CAPTCHAs or submit applications.</p></div>
-              <form className="capture-import-card" onSubmit={importPortalCapture}><div className="card-heading"><span className="card-kicker">Discovery batch</span><button type="button" onClick={() => void pasteCapture()}>Paste from clipboard</button></div><textarea required rows={9} value={captureText} onChange={(event) => setCaptureText(event.target.value)} placeholder={'Paste JSON from the browser companion\n{ "captureVersion": 1, "portal": "LinkedIn", "jobs": [...] }'} /><button className="primary-button wide" disabled={busy === "capture-import"}>{busy === "capture-import" ? "Normalizing and scoring..." : "Import captured jobs"}</button></form>
+            <section className="alert-ingestion-section">
+              <div className="alert-inbox-explainer"><span className="card-kicker">Portal alert inbox</span><h2>Let the portals send jobs to you</h2><p>Create daily alerts once on LinkedIn, Naukri, Indeed or Foundit. RoleSignal extracts their job links, merges duplicates and scores them with the same resume model.</p><ol><li><b>1</b><span>Create a daily alert on the portal.</span></li><li><b>2</b><span>Copy the complete alert email for now; automatic forwarding uses the same endpoint when connected.</span></li><li><b>3</b><span>Paste it here and RoleSignal does the rest.</span></li></ol>{latestAlertImport && <div className="latest-alert-import"><span>Last import</span><strong>{latestAlertImport.provider} / {latestAlertImport.jobsFound} found / {latestAlertImport.imported} new</strong><small>{postedLabel(latestAlertImport.createdAt)}</small></div>}</div>
+              <form className="alert-import-card" onSubmit={importJobAlert}><div className="card-heading"><span className="card-kicker">Import a job alert</span><button type="button" onClick={() => void pasteJobAlert()}>Paste email</button></div><div className="alert-form-row"><label>Portal<select value={alertForm.provider} onChange={(event) => setAlertForm({ ...alertForm, provider: event.target.value })}>{["LinkedIn", "Naukri", "Indeed", "Foundit", "Instahyre", "Cutshort", "Other"].map((provider) => <option key={provider}>{provider}</option>)}</select></label><label>Email subject<input value={alertForm.subject} onChange={(event) => setAlertForm({ ...alertForm, subject: event.target.value })} placeholder="Daily jobs for Backend Engineer" /></label></div><label>Complete alert email<textarea required rows={10} value={alertForm.content} onChange={(event) => setAlertForm({ ...alertForm, content: event.target.value })} placeholder="Paste the complete text or HTML of the job-alert email here..." /></label><button className="primary-button wide" disabled={busy === "alert-import" || profileStatus !== "VERIFIED"}>{profileStatus !== "VERIFIED" ? "Confirm profile before importing" : busy === "alert-import" ? "Extracting and scoring jobs..." : "Import, deduplicate and score"}</button>{alertFeedback && <div role="status" className={`operation-feedback ${alertFeedback.tone}`}>{alertFeedback.message}</div>}<p>Your portal password and session never enter RoleSignal.</p></form>
+            </section>
+
+            <section className="portal-search-section">
+              <div className="section-heading"><div><span className="eyebrow">Set up alerts at the source</span><h2>Open a portal with your current search</h2></div><span className="quiet-label">One-time setup</span></div>
+              <div className="portal-grid">{portalSearches.map((portal) => <a key={portal.name} href={portal.url} target="_blank" rel="noreferrer"><span className="portal-mark">{portal.mark}</span><span><strong>{portal.name}</strong><small>{portal.note}</small></span><b>-&gt;</b></a>)}<div className="portal-info"><span className="portal-mark">W</span><span><strong>Workday</strong><small>Covered through company career pages</small></span><b>Official</b></div></div>
             </section>
 
             {latestDiscovery && <section className="discovery-results">
@@ -1211,9 +1233,9 @@ export function RoleSignalApp() {
             <PageTitle eyebrow="Live ingestion" title="Bring official jobs into one signal" copy="Scan public Greenhouse, Lever and Ashby boards, or import a single official job page and full description." action={sources.length ? (busy === "scan-all" ? "Running all sources..." : "Run all connected") : undefined} actionDisabled={busy === "scan-all"} onAction={() => void runAllSources()} />
             <div className="source-grid">
               <form className="source-card" onSubmit={scanSource}>
-                <span className="card-kicker">ATS board scan</span><h3>Connect a company board</h3><p>Use the company token from a Greenhouse, Lever or Ashby careers URL. Public job listings are fetched without application credentials.</p>
+                <span className="card-kicker">ATS board scan</span><h3>Connect a company board</h3><p>Paste a public Greenhouse, Lever or Ashby careers URL. RoleSignal detects the provider and company token automatically.</p>
                 <label>Provider<select value={sourceForm.provider} onChange={(event) => setSourceForm({ ...sourceForm, provider: event.target.value })}><option value="greenhouse">Greenhouse</option><option value="lever">Lever</option><option value="ashby">Ashby</option></select></label>
-                <label>Company token<input required value={sourceForm.token} onChange={(event) => setSourceForm({ ...sourceForm, token: event.target.value })} placeholder="example-company" /></label>
+                <label>Careers URL or token<input required value={sourceForm.token} onChange={(event) => setSourceForm({ ...sourceForm, token: event.target.value })} placeholder="https://jobs.lever.co/example-company" /></label>
                 <label>Company name<input value={sourceForm.label} onChange={(event) => setSourceForm({ ...sourceForm, label: event.target.value })} placeholder="Example Company" /></label>
                 <button className="primary-button wide" disabled={busy === "source-scan"}>{busy === "source-scan" ? "Scanning and scoring..." : "Scan published roles"}</button>
               </form>
@@ -1255,7 +1277,7 @@ export function RoleSignalApp() {
 
         {view === "autopilot" && (
           <div className="page inner-page">
-            <PageTitle eyebrow="Phase 5 automation" title="Your job search keeps watch" copy="An hourly Worker checks whether your saved search is due, scores new roles against the evidence graph and places only qualified matches in the Signal inbox." action={busy === "automation-run" ? "Running now..." : "Run automation now"} actionDisabled={busy === "automation-run"} onAction={() => void runScheduledNow()} />
+            <PageTitle eyebrow="Search automation" title="Your job search keeps watch" copy="A scheduled search checks whether your saved search is due, scores new roles against the active evidence version and places only qualified matches in the Signal inbox." action={busy === "automation-run" ? "Running now..." : "Run automation now"} actionDisabled={busy === "automation-run" || profileStatus !== "VERIFIED"} onAction={() => void runScheduledNow()} />
             <form className="automation-command-card" onSubmit={saveSchedule}>
               <div className="automation-state"><span className={scheduleEnabled ? "automation-orb on" : "automation-orb"} /><span><strong>{scheduleEnabled ? "Scheduled discovery is active" : "Scheduled discovery is paused"}</strong><small>{automation?.lastRunAt ? `Last run ${postedLabel(automation.lastRunAt)} / next ${postedLabel(automation.nextRunAt)}` : "Save a cadence to begin background discovery."}</small></span></div>
               <label>Cadence<select value={cadenceHours} onChange={(event) => setCadenceHours(Number(event.target.value))}><option value={6}>Every 6 hours</option><option value={12}>Every 12 hours</option><option value={24}>Daily</option><option value={72}>Every 3 days</option></select></label>
@@ -1271,11 +1293,11 @@ export function RoleSignalApp() {
                 <RuleSlider label="Daily preparation limit" value={dailyLimit} min={1} max={12} onChange={setDailyLimit} suffix=" roles" help="A quality cap, not an application quota" />
                 <Guardrail title="Unknown required answers" copy="Compensation, notice period, authorization and declarations" value="Always pause" />
                 <Guardrail title="CAPTCHA or bot protection" copy="No bypasses or security workarounds" value="Manual action" />
-                <Guardrail title="Final submission" copy="Compatible ATS only, after all checks pass" value={executionSettings.mode === "AUTO_SUBMIT" ? "Policy controlled" : "You click"} />
+                <Guardrail title="Final submission" copy="RoleSignal never clicks the final submit control" value="You click" />
                 <button className="primary-button wide" onClick={() => void saveRules()}>Save automation rules</button>
               </section>
               <aside className="guardrail-card">
-                <div className="shield-mark">✓</div><span className="card-kicker">Browser companion v0.7</span><h3>Fill the facts. Stop at uncertainty.</h3><p>The paired extension consumes only your approved Phase 7 queue, fills verified fields and reports every outcome back to RoleSignal.</p>
+                <div className="shield-mark">✓</div><span className="card-kicker">Browser companion v0.7</span><h3>Fill the facts. Stop at uncertainty.</h3><p>The paired extension consumes only your current approved queue, fills verified fields and reports every outcome back to RoleSignal.</p>
                 <ul><li><i>✓</i> Conservative Greenhouse, Lever and Ashby execution</li><li><i>✓</i> Host-locked application packets</li><li><i>✓</i> Unknown required-field and CAPTCHA pauses</li><li><i>✓</i> Portal-confirmed submission tracking</li></ul>
                 <button className="download-button" onClick={() => setView("execution")}>Open Assisted Apply</button>
               </aside>
@@ -1289,29 +1311,31 @@ export function RoleSignalApp() {
 
         {view === "applications" && (
           <div className="page inner-page">
-            <PageTitle eyebrow="Application ledger" title="Prepared, blocked and approved" copy="Every state change remains traceable. Approved packets can now enter the Phase 7 execution queue for browser fill or compatible auto-submit." action="Export ledger" onAction={() => { window.location.href = "/api/rolesignal/export/ledger.csv"; }} />
+            <PageTitle eyebrow="Applications" title="Prepared, blocked and approved" copy="Every packet is tied to the resume version that created it. Only reviewed, current evidence can enter guarded browser fill." action="Export ledger" onAction={() => { window.location.href = "/api/rolesignal/export/ledger.csv"; }} />
+            <div className="application-tools"><button className="secondary-button" onClick={() => setView("studio")}>Tailored documents</button><button className="secondary-button" onClick={() => setView("execution")}>Guarded browser fill</button></div>
             {!packets.length ? <EmptyState title="No application packets yet" copy="Prepare a qualified live match to generate resume guidance and a browser-safe field packet." action="Review matches" onAction={() => setView("matches")} /> : <div className="packet-stack">{packets.map((packet) => <article className="packet-card" key={packet.id}>
               <div className="packet-main"><div><span className="card-kicker">{packet.company}</span><h3>{packet.role}</h3><p><b>{packet.score}/100</b> match / Resume: {packet.resumeStrategy.fit || "DEFAULT"}</p></div><span className={`packet-status ${packet.status.toLowerCase()}`}>{readableStatus(packet.status)}</span></div>
               {packet.kit && <div className="kit-box"><div><span className="card-kicker">Reusable application kit</span><p>{packet.kit.summary}</p></div><div className="kit-answer"><strong>Why this role</strong><p>{packet.kit.whyAnswer}</p></div></div>}
               {packet.resumeStrategy.changes?.length ? <div className="packet-guidance"><strong>Recommended evidence order</strong><ul>{packet.resumeStrategy.changes.map((change) => <li key={change}>{change}</li>)}</ul></div> : null}
               {packet.blockers.length > 0 && <div className="blocker-box"><strong>Needs your input</strong>{packet.blockers.map((blocker) => <span key={blocker.id}>{blocker.question}</span>)}</div>}
-              <div className="packet-actions"><button className="studio-button" disabled={busy === "studio-generate"} onClick={() => void openStudioForPacket(packet)}>Tailor resume</button>{packet.kit && <button className="secondary-button" onClick={() => void copyApplicationKit(packet)}>Copy application kit</button>}<button className="secondary-button" onClick={() => void copyBrowserPacket(packet)}>Copy browser packet</button><button className="secondary-button" onClick={() => openApplication(packet)}>Open application</button>{executionSettings.enabled && <button className="execution-queue-button" disabled={packet.blockers.length > 0 || busy === `execution-queue-${packet.jobId}`} onClick={() => void queueJobForExecution(packet.jobId)}>Queue for apply</button>}<button className="primary-button" disabled={packet.blockers.length > 0 || packet.status === "APPROVED_FOR_FILL" || busy === `approve-${packet.id}`} onClick={() => void approvePacket(packet)}>{packet.status === "APPROVED_FOR_FILL" ? "Approved for fill" : "Approve for fill"}</button></div>
+              <div className="packet-actions"><button className="studio-button" disabled={busy === "studio-generate"} onClick={() => void openStudioForPacket(packet)}>Tailor resume</button>{packet.kit && <button className="secondary-button" onClick={() => void copyApplicationKit(packet)}>Copy application kit</button>}<button className="secondary-button" onClick={() => void copyBrowserPacket(packet)}>Copy browser packet</button><button className="secondary-button" onClick={() => openApplication(packet)}>Open application</button>{executionSettings.enabled && <button className="execution-queue-button" disabled={packet.status !== "APPROVED_FOR_FILL" || packet.blockers.length > 0 || busy === `execution-queue-${packet.jobId}`} onClick={() => void queueJobForExecution(packet.jobId)}>{packet.status === "APPROVED_FOR_FILL" ? "Queue approved fill" : "Approve before queueing"}</button>}<button className="primary-button" disabled={packet.blockers.length > 0 || packet.status === "APPROVED_FOR_FILL" || busy === `approve-${packet.id}`} onClick={() => void approvePacket(packet)}>{packet.status === "APPROVED_FOR_FILL" ? "Approved for fill" : "Approve for fill"}</button></div>
             </article>)}</div>}
           </div>
         )}
 
         {view === "studio" && <StudioView documents={studioDocuments} jobs={studioJobs} selectedId={selectedStudioId} busy={busy} onSelect={setSelectedStudioId} onGenerate={generateStudio} onSave={saveStudio} onApprove={approveStudio} onCopy={copyStudioText} />}
 
-        {view === "execution" && <ExecutionView key={executionSettings.updatedAt || "phase7-default"} settings={executionSettings} executions={executions} devices={companionDevices} connectionKey={connectionKey} qualifiedCount={qualifiedJobs.length} busy={busy} onSave={saveExecutionSettings} onQueueAll={queueQualifiedForExecution} onPair={pairCompanion} onRevoke={revokeCompanion} onRetry={retryExecution} onCopyKey={copyConnectionKey} />}
+        {view === "execution" && <ExecutionView key={executionSettings.updatedAt || "execution-default"} settings={executionSettings} executions={executions} devices={companionDevices} connectionKey={connectionKey} qualifiedCount={approvedQueueCount} busy={busy} onSave={saveExecutionSettings} onQueueAll={queueQualifiedForExecution} onPair={pairCompanion} onRevoke={revokeCompanion} onRetry={retryExecution} onCopyKey={copyConnectionKey} />}
 
         {view === "profile" && (
           <div className="page inner-page">
-            <PageTitle eyebrow="Source of truth" title="Your verified career profile" copy="PDF, DOCX and TXT resumes are extracted locally, then stored with the evidence used for matching." action="Upload new resume" onAction={() => fileInput.current?.click()} />
+            <PageTitle eyebrow="Source of truth" title="Your career profile" copy="A resume becomes active only after you review its identity, skills and evidence. Older applications keep their history but cannot reuse stale claims." action="Upload new resume" onAction={() => fileInput.current?.click()} />
             <div className="profile-grid">
-              <section className="profile-card wide-card"><span className="card-kicker">Current profile</span><div className="profile-title"><div className="company-avatar">RK</div><div><h3>{profile.title}</h3><p>{profile.name} / approximately {profile.experienceYears || 3} years</p></div><span className="verified-tag">✓ Evidence locked</span></div><p className="profile-summary">{profile.domains.slice(0, 5).join(" / ")}</p></section>
+              {pendingProfile && <section className="profile-card wide-card profile-review-card"><div className="card-heading"><div><span className="card-kicker">Resume version {pendingProfile.version}</span><h3>Review before activating</h3></div><span className="pending-tag">Pending review</span></div><p>Correct anything extraction got wrong. Confirming this version will make older scores and drafts stale.</p><div className="profile-review-grid"><label>Name<input value={pendingProfile.profile.name} onChange={(event) => setPendingProfile({ ...pendingProfile, profile: { ...pendingProfile.profile, name: event.target.value } })} /></label><label>Email<input type="email" value={pendingProfile.profile.email} onChange={(event) => setPendingProfile({ ...pendingProfile, profile: { ...pendingProfile.profile, email: event.target.value } })} /></label><label>Current title<input value={pendingProfile.profile.title} onChange={(event) => setPendingProfile({ ...pendingProfile, profile: { ...pendingProfile.profile, title: event.target.value } })} /></label><label>Years of experience<input type="number" min="0" max="50" value={pendingProfile.profile.experienceYears} onChange={(event) => setPendingProfile({ ...pendingProfile, profile: { ...pendingProfile.profile, experienceYears: Number(event.target.value) } })} /></label></div><label>Verified skills<textarea rows={4} value={pendingProfile.profile.skills.join(", ")} onChange={(event) => setPendingProfile({ ...pendingProfile, profile: { ...pendingProfile.profile, skills: event.target.value.split(",").map((item) => item.trim()).filter(Boolean) } })} /></label><label>Evidence statements<textarea rows={7} value={pendingProfile.profile.evidence.join("\n")} onChange={(event) => setPendingProfile({ ...pendingProfile, profile: { ...pendingProfile.profile, evidence: event.target.value.split("\n").map((item) => item.trim()).filter(Boolean) } })} /></label><button className="primary-button wide" disabled={busy === "profile-confirm"} onClick={() => void confirmPendingProfile()}>{busy === "profile-confirm" ? "Activating verified profile..." : "Confirm and activate this profile"}</button></section>}
+              {profileStatus === "VERIFIED" ? <section className="profile-card wide-card"><span className="card-kicker">Active verified profile</span><div className="profile-title"><div className="company-avatar">{profileInitials}</div><div><h3>{profile.title}</h3><p>{profile.name} / approximately {profile.experienceYears} years</p></div><span className="verified-tag">✓ Version locked</span></div><p className="profile-summary">{profile.domains.slice(0, 5).join(" / ")}</p><small className="version-reference">Evidence version {activeProfileVersionId.slice(0, 8)}</small></section> : !pendingProfile && <EmptyState title="No verified profile yet" copy="Upload a PDF, DOCX or TXT resume. You will review the extracted evidence before anything is used." action="Upload resume" onAction={() => fileInput.current?.click()} />}
               <ResumePanel resumeName={resumeName} state={uploadState} onChoose={() => fileInput.current?.click()} />
-              <section className="profile-card wide-card"><div className="card-heading"><span className="card-kicker">Extracted evidence</span><span className="quiet-label">{profile.source === "resume" ? "Resume-derived" : "Verified brief"}</span></div><div className="evidence-list">{profile.evidence.slice(0, 6).map((item) => <p key={item}>{item}</p>)}</div></section>
-              <section className="profile-card wide-card"><span className="card-kicker">Verified skills</span><div className="skill-cloud">{profile.skills.slice(0, 24).map((skill) => <span key={skill}>{skill}<i>✓</i></span>)}</div></section>
+              {profileStatus === "VERIFIED" && <section className="profile-card wide-card"><div className="card-heading"><span className="card-kicker">Extracted evidence</span><span className="quiet-label">Active resume only</span></div><div className="evidence-list">{profile.evidence.slice(0, 10).map((item) => <p key={item}>{item}</p>)}</div></section>}
+              {profileStatus === "VERIFIED" && <section className="profile-card wide-card"><span className="card-kicker">Verified skills</span><div className="skill-cloud">{profile.skills.slice(0, 30).map((skill) => <span key={skill}>{skill}<i>✓</i></span>)}</div></section>}
               <form className="profile-card wide-card answer-vault-card" onSubmit={saveAnswerVault}><div className="card-heading"><div><span className="card-kicker">Verified answer vault</span><h3>Facts safe to reuse</h3></div><span className="quiet-label">{answerVault.length}/9 saved</span></div><p>Store recurring form answers once. RoleSignal can fill only these verified values; sensitive or missing judgments still pause for you.</p><div className="vault-grid">{answerFields.map((field) => <label className="vault-field" key={field.key}><span>{field.label}{field.sensitive && <i className="sensitive-tag">Sensitive</i>}</span><input type={field.key === "phone" ? "tel" : field.key.endsWith("_url") ? "url" : "text"} value={answerValues[field.key] || ""} placeholder={field.placeholder} onChange={(event) => setAnswerValues({ ...answerValues, [field.key]: event.target.value })} /></label>)}</div><div className="vault-footer"><span>Saved values are private to this signed-in workspace.</span><button className="primary-button" disabled={busy === "answer-vault"}>{busy === "answer-vault" ? "Saving..." : "Save verified answers"}</button></div></form>
               <section className="profile-card paste-card"><span className="card-kicker">Fallback extraction</span><h3>Paste resume text</h3><p>Use this when a scanned PDF contains no selectable text. Nothing is inferred beyond the pasted evidence.</p><textarea rows={9} value={resumeText} onChange={(event) => setResumeText(event.target.value)} placeholder="Paste the complete resume text here..." /><button className="secondary-button wide" disabled={busy === "resume-text"} onClick={() => void analyzePastedResume()}>{busy === "resume-text" ? "Analyzing..." : "Analyze pasted resume"}</button></section>
             </div>
@@ -1332,10 +1356,10 @@ function JobCard({ job, onReview, onAnalyze, expanded = false, busy = false, ana
   const ringStyle = { "--score": `${job.score * 3.6}deg` } as CSSProperties;
   const initials = job.company.split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase();
   return <article className={expanded ? "job-card expanded" : "job-card"}>
-    <div className="job-main"><div className="company-logo green">{initials}</div><div className="job-info"><div className="job-company"><span>{job.company}</span>{job.highPriority && <i>High priority</i>}{job.isSample && <i>Sample</i>}</div><h3>{job.role}</h3><p>{job.location}<b>·</b>{job.workMode}<b>·</b>{postedLabel(job.postedDate)}<b>·</b>{job.platform}</p><div className="tag-row">{job.matchingExperience.slice(0, 3).map((tag) => <span key={tag}>{tag}</span>)}</div></div></div>
+    <div className="job-main"><div className="company-logo green">{initials}</div><div className="job-info"><div className="job-company"><span>{job.company}</span>{job.highPriority && <i>High priority</i>}</div><h3>{job.role}</h3><p>{job.location}<b>·</b>{job.workMode}<b>·</b>{postedLabel(job.postedDate)}<b>·</b>{job.platform}</p><div className="tag-row">{job.matchingExperience.slice(0, 3).map((tag) => <span key={tag}>{tag}</span>)}</div></div></div>
     <div className="job-actions"><div className="score-ring" style={ringStyle}><span><b>{job.score}</b><small>match</small></span></div></div>
     {expanded && <div className="job-explanation"><div><span className="fit-label">Evidence-semantic matches</span>{job.semanticMatches?.length ? job.semanticMatches.slice(0, 3).map((item) => <p key={item.requirement}><strong>{item.requirement}</strong> — {item.evidence}</p>) : job.matchingExperience.length ? job.matchingExperience.slice(0, 3).map((item) => <p key={item}>{item}</p>) : <p>No verified overlap was strong enough to cite.</p>}</div><div><span className="gap-label">Missing / watch-outs</span>{[...job.missingRequirements, ...job.redFlags].length ? [...job.missingRequirements, ...job.redFlags].slice(0, 3).map((item) => <p key={item}>{item}</p>) : <p>No material gap detected.</p>}</div></div>}
-    <div className="job-footer"><span className="match-class"><i />{job.classification} match{job.enrichedAt ? " / Full JD" : ""}</span><span>{readableStatus(job.status)}</span>{onAnalyze && <button className="analyze-action" disabled={analyzing || job.isSample} onClick={onAnalyze}>{analyzing ? "Analyzing..." : job.enrichedAt ? "Re-analyze JD" : "Deep-analyze JD"}</button>}<button disabled={busy || job.status === "SKIPPED"} onClick={onReview}>{busy ? "Preparing..." : job.status === "SKIPPED" ? "Not eligible" : "Prepare application"} -&gt;</button></div>
+    <div className="job-footer"><span className="match-class"><i />{job.classification} match{job.enrichedAt ? " / Full JD" : ""}</span><span>{readableStatus(job.status)}</span>{onAnalyze && <button className="analyze-action" disabled={analyzing} onClick={onAnalyze}>{analyzing ? "Analyzing..." : job.enrichedAt ? "Re-analyze JD" : "Deep-analyze JD"}</button>}<button disabled={busy || job.status === "SKIPPED"} onClick={onReview}>{busy ? "Preparing..." : job.status === "SKIPPED" ? "Not eligible" : "Prepare application"} -&gt;</button></div>
   </article>;
 }
 

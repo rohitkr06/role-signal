@@ -88,7 +88,7 @@ export function ExecutionView({ settings, executions, devices, connectionKey, qu
 
   return <div className="page inner-page execution-page">
     <section className="execution-hero">
-      <div><span className="eyebrow">Phase 7 / Assisted Apply</span><h1>Let the qualified queue move while you work.</h1><p>RoleSignal sends approved applications to your paired Chrome companion. Supported ATS forms can submit automatically; logins, CAPTCHAs and unanswered required fields move into one small review queue.</p></div>
+      <div><span className="eyebrow">Guarded browser fill</span><h1>Move approved applications without losing control.</h1><p>RoleSignal sends only current, explicitly approved packets to your paired Chrome companion. Supported Greenhouse, Lever and Ashby forms fill verified fields and pause for your review before submission.</p></div>
       <div className="execution-hero-action"><span className={draft.enabled ? "execution-live on" : "execution-live"}><i />{draft.enabled ? "Execution active" : "Execution paused"}</span><button className="primary-button" disabled={busy === "execution-queue" || !draft.enabled} onClick={() => void onQueueAll()}>{busy === "execution-queue" ? "Building queue..." : `Queue ${qualifiedCount} qualified roles`}</button></div>
     </section>
 
@@ -101,16 +101,16 @@ export function ExecutionView({ settings, executions, devices, connectionKey, qu
 
     <div className="execution-control-grid">
       <form className="execution-policy-card" onSubmit={(event) => { event.preventDefault(); void onSave(draft); }}>
-        <div className="execution-card-heading"><div><span className="card-kicker">Execution policy</span><h2>Choose how far RoleSignal can go</h2></div><button type="button" className={draft.enabled ? "switch large on" : "switch large"} onClick={() => setDraft({ ...draft, enabled: !draft.enabled })} aria-label="Toggle Phase 7 execution"><span /></button></div>
+        <div className="execution-card-heading"><div><span className="card-kicker">Execution policy</span><h2>Fill verified facts, then pause</h2></div><button type="button" className={draft.enabled ? "switch large on" : "switch large"} onClick={() => setDraft({ ...draft, enabled: !draft.enabled })} aria-label="Toggle guarded browser fill"><span /></button></div>
         <div className="execution-mode-choice">
           <button type="button" className={draft.mode === "FILL_ONLY" ? "selected" : ""} onClick={() => setDraft({ ...draft, mode: "FILL_ONLY" })}><i>01</i><span><strong>Fill and pause</strong><small>Complete supported fields; you submit.</small></span></button>
-          <button type="button" className={draft.mode === "AUTO_SUBMIT" ? "selected" : ""} onClick={() => setDraft({ ...draft, mode: "AUTO_SUBMIT" })}><i>02</i><span><strong>Auto-submit compatible</strong><small>Submit only when the ATS confirms every guardrail.</small></span></button>
+          <div className="execution-coming-soon"><i>02</i><span><strong>Auto-submit is not enabled</strong><small>It remains off until provider-specific submission tests are published.</small></span></div>
         </div>
         <label className="execution-range"><span><strong>Minimum match</strong><small>Jobs below this never enter the queue.</small></span><b>{draft.minScore}%</b><input type="range" min="70" max="95" value={draft.minScore} onChange={(event) => setDraft({ ...draft, minScore: Number(event.target.value) })} /></label>
         <label className="execution-range"><span><strong>Daily application cap</strong><small>Limits volume and duplicate exposure.</small></span><b>{draft.dailyLimit}</b><input type="range" min="1" max="20" value={draft.dailyLimit} onChange={(event) => setDraft({ ...draft, dailyLimit: Number(event.target.value) })} /></label>
         <label className="execution-check"><input type="checkbox" checked={draft.requireTailoredResume} onChange={(event) => setDraft({ ...draft, requireTailoredResume: event.target.checked })} /><span><strong>Require an approved tailored resume</strong><small>When off, the most recent uploaded resume is allowed as a fallback.</small></span></label>
         <div className="execution-guardrails"><span><i>✓</i> Never invent answers</span><span><i>✓</i> Never bypass CAPTCHA</span><span><i>✓</i> Confirm before marking submitted</span></div>
-        <button className="primary-button wide" disabled={busy === "execution-settings"}>{busy === "execution-settings" ? "Saving policy..." : "Save Phase 7 policy"}</button>
+        <button className="primary-button wide" disabled={busy === "execution-settings"}>{busy === "execution-settings" ? "Saving policy..." : "Save fill policy"}</button>
       </form>
 
       <aside className="companion-pair-card">
@@ -126,7 +126,7 @@ export function ExecutionView({ settings, executions, devices, connectionKey, qu
       {!executions.length ? <div className="execution-empty"><span>↗</span><strong>Your execution queue is empty.</strong><p>Enable the policy, pair Chrome, then queue the jobs at or above your match threshold.</p></div> : <div className="execution-table">
         {executions.map((execution) => <article key={execution.id}>
           <div className="execution-company"><span>{execution.company.split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase()}</span><div><strong>{execution.role}</strong><small>{execution.company} / {execution.platform} / {execution.score}% match</small></div></div>
-          <div className="execution-resume"><span>{execution.documentVersion ? `Tailored v${execution.documentVersion}` : "Primary resume"}</span><small>{execution.mode === "AUTO_SUBMIT" ? "Auto-submit allowed" : "Fill only"}</small></div>
+          <div className="execution-resume"><span>{execution.documentVersion ? `Tailored v${execution.documentVersion}` : "Primary resume"}</span><small>Fill and pause</small></div>
           <div><span className={`execution-status ${execution.status.toLowerCase()}`}>{label(execution.status)}</span>{execution.unknownRequired.length > 0 && <small className="execution-issue">{execution.unknownRequired[0]}</small>}</div>
           <div className="execution-row-actions"><a href={execution.applicationUrl} target="_blank" rel="noreferrer">Open</a>{terminalStatuses.has(execution.status) && execution.status !== "SUBMITTED" && <button disabled={busy === `execution-retry-${execution.id}`} onClick={() => void onRetry(execution.id)}>Retry</button>}</div>
         </article>)}

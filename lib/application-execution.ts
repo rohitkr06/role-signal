@@ -6,7 +6,7 @@ export type ExecutionCapability = {
   reason: string;
 };
 
-const autoSubmitHosts = [
+const fillPauseHosts = [
   { pattern: /(^|\.)boards\.greenhouse\.io$/i, portal: "Greenhouse" },
   { pattern: /(^|\.)job-boards\.greenhouse\.io$/i, portal: "Greenhouse" },
   { pattern: /(^|\.)jobs\.lever\.co$/i, portal: "Lever" },
@@ -26,11 +26,11 @@ export function executionCapability(applicationUrl: string, platform = ""): Exec
   try { host = new URL(applicationUrl).hostname; } catch {
     return { portal: platform || "Unknown", level: "UNSUPPORTED", reason: "The application URL is invalid." };
   }
-  const automatic = autoSubmitHosts.find((candidate) => candidate.pattern.test(host));
-  if (automatic) return {
-    portal: automatic.portal,
-    level: "AUTO_SUBMIT",
-    reason: "Single-page application form with a conservative submit confirmation flow.",
+  const fillPause = fillPauseHosts.find((candidate) => candidate.pattern.test(host));
+  if (fillPause) return {
+    portal: fillPause.portal,
+    level: "ASSISTED",
+    reason: "Supported for verified-field fill and pause. You review and submit.",
   };
   const assisted = assistedHosts.find((candidate) => candidate.pattern.test(host));
   if (assisted) return {
@@ -46,7 +46,9 @@ export function executionCapability(applicationUrl: string, platform = ""): Exec
 }
 
 export function effectiveExecutionMode(requested: ExecutionMode, capability: ExecutionCapability): ExecutionMode {
-  return requested === "AUTO_SUBMIT" && capability.level === "AUTO_SUBMIT" ? "AUTO_SUBMIT" : "FILL_ONLY";
+  void requested;
+  void capability;
+  return "FILL_ONLY";
 }
 
 export function executionStatusFromReport(report: {
@@ -68,7 +70,7 @@ export function clampExecutionSettings(input: Record<string, unknown>) {
     enabled: input.enabled === true,
     minScore: Math.max(70, Math.min(95, Number(input.minScore ?? 75))),
     dailyLimit: Math.max(1, Math.min(20, Number(input.dailyLimit ?? 5))),
-    mode: input.mode === "AUTO_SUBMIT" ? "AUTO_SUBMIT" as const : "FILL_ONLY" as const,
+    mode: "FILL_ONLY" as const,
     requireTailoredResume: input.requireTailoredResume === true,
   };
 }
