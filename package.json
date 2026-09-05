@@ -8,7 +8,8 @@
   "scripts": {
     "dev": "vinext dev",
     "build": "vinext build",
-    "start": "vinext start",
+    "start": "node scripts/start-worker.mjs",
+    "start:node": "vinext start",
     "test": "npm run build && node --test tests/rendered-html.test.mjs tests/job-eligibility.test.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next --ignore-pattern work",
     "db:generate": "drizzle-kit generate"

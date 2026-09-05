@@ -382,7 +382,9 @@ export function RoleSignalApp() {
   const latestRun = searchRuns[0];
   const latestDiscovery = discoveryRuns[0];
   const unreadAlerts = alerts.filter((alert) => alert.status === "UNREAD");
-  const activeDiscoverySources = discoverySources.filter((source) => source.status === "LIVE");
+  const availableDiscoverySources = discoverySources.filter((source) =>
+    source.lane === "PUBLIC_API" && source.status !== "NEEDS_KEY" && source.status !== "UNAVAILABLE",
+  );
   const latestAlertImport = alertImports[0];
   const approvedQueueCount = packets.filter((packet) => packet.status === "APPROVED_FOR_FILL").length;
   const profileInitials = (profile.name || accountName).split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase() || "RS";
@@ -788,7 +790,14 @@ export function RoleSignalApp() {
       });
       await loadWorkspace();
       setView("discovery");
-      setToast(result.run.cached ? "Public feeds refresh hourly. Showing the latest matching discovery run." : `Discovery complete: ${result.run.qualified} qualified matches from ${result.run.discovered} listings.`);
+      const failedSources = result.run.report.failures?.length ?? 0;
+      setToast(
+        result.run.cached
+          ? "Showing the latest successful result for this search. Automatic feeds refresh every six hours."
+          : result.run.status === "FAILED"
+            ? `Discovery could not reach ${failedSources || "any"} automatic sources. See Source health for the exact errors.`
+            : `Discovery complete: ${result.run.qualified} qualified matches from ${result.run.discovered} listings.`,
+      );
     } catch (error) {
       setToast(error instanceof Error ? error.message : "The discovery run could not finish.");
     } finally {
@@ -1204,12 +1213,12 @@ export function RoleSignalApp() {
                 <label>Locations<input value={discoveryForm.locations} onChange={(event) => setDiscoveryForm({ ...discoveryForm, locations: event.target.value })} placeholder="India, Bengaluru, Remote" /></label>
                 <div className="discovery-controls"><label>Minimum match<input type="number" min={50} max={95} value={discoveryForm.minScore} onChange={(event) => setDiscoveryForm({ ...discoveryForm, minScore: Number(event.target.value) })} /></label><div><span>Work modes</span><div className="mode-pills">{["Remote", "Hybrid", "On-site"].map((mode) => <button type="button" key={mode} className={discoveryForm.workModes.includes(mode) ? "active" : ""} onClick={() => setDiscoveryForm({ ...discoveryForm, workModes: discoveryForm.workModes.includes(mode) ? discoveryForm.workModes.filter((value) => value !== mode) : [...discoveryForm.workModes, mode] })}>{mode}</button>)}</div></div></div>
                 <button className="primary-button wide" disabled={busy === "discovery-run"}>{busy === "discovery-run" ? "Fetching, deduplicating and scoring..." : "Find and rank matching jobs"}</button>
-                <p className="refresh-note">One click checks every connected automatic source. The same saved search is reused for six hours to respect source limits.</p>
+                <p className="refresh-note">One click checks every connected automatic source. Successful results are reused for six hours to respect source limits; failed or empty runs retry immediately.</p>
               </form>
 
               <aside className="coverage-card phase8-coverage">
                 <span className="card-kicker">Discovery status</span><h2>Useful before you add any API keys</h2><p>Freehire and Remotive provide open India and remote coverage. Optional APIs, company boards and portal alerts widen the search without storing portal passwords.</p>
-                <div className="coverage-stat"><strong>{activeDiscoverySources.length}</strong><span>automatic<br />sources</span></div>
+                <div className="coverage-stat"><strong>{availableDiscoverySources.length}</strong><span>automatic<br />sources ready</span></div>
                 <div className="coverage-row"><span className="coverage-mark public">01</span><span><strong>India + global remote APIs</strong><small>Freehire and Remotive work without keys; Adzuna and Jooble are optional</small></span><b>Automatic</b></div>
                 <div className="coverage-row"><span className="coverage-mark ats">02</span><span><strong>Official career boards</strong><small>{sources.length ? `${sources.length} employer boards connected` : "Ready for your target-employer list"}</small></span><b>Automatic</b></div>
                 <div className="coverage-row"><span className="coverage-mark portal">03</span><span><strong>Portal alert inbox</strong><small>LinkedIn, Naukri, Indeed and Foundit alert emails</small></span><b>Safe import</b></div>

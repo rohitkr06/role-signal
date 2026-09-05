@@ -13,6 +13,12 @@ async function render() {
   );
 }
 
+async function loadWorker() {
+  const workerUrl = new URL("../dist/server/index.js", import.meta.url);
+  workerUrl.searchParams.set("test", `${process.pid}-${Date.now()}-api`);
+  return (await import(workerUrl.href)).default;
+}
+
 test("server-renders the RoleSignal product shell", async () => {
   const response = await render();
   assert.equal(response.status, 200);
@@ -21,6 +27,20 @@ test("server-renders the RoleSignal product shell", async () => {
   assert.match(html, /<title>RoleSignal/);
   assert.match(html, /Find work worth applying for/);
   assert.doesNotMatch(html, /Your site is taking shape|react-loading-skeleton/);
+});
+
+test("returns an actionable error when the database binding is missing", async () => {
+  const worker = await loadWorker();
+  const response = await worker.fetch(
+    new Request("http://localhost/api/rolesignal/workspace"),
+    undefined,
+    { waitUntil() {}, passThroughOnException() {} },
+  );
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), {
+    error: "RoleSignal's database is not available in this runtime. For local development use `npm run dev`. For Railway, build the app and use the repository's `npm start` command so its local Cloudflare-compatible database is created.",
+    code: "DATABASE_BINDING_MISSING",
+  });
 });
 
 test("keeps trustworthy evidence, discovery, and guarded execution contracts in source", async () => {
@@ -61,6 +81,9 @@ test("keeps trustworthy evidence, discovery, and guarded execution contracts in 
   assert.match(worker, /jooble\.org\/api/);
   assert.match(worker, /freehire\.me\/api\/v1\/agent\/jobs\/search/);
   assert.match(worker, /remotive\.com\/api\/remote-jobs/);
+  assert.match(worker, /redirect:\s*"manual"/);
+  assert.doesNotMatch(worker, /redirect:\s*"error"/);
+  assert.match(worker, /status IN \('COMPLETED', 'PARTIAL'\)/);
   assert.match(worker, /serpapi\.com\/search\.json/);
   assert.match(worker, /\/api\/rolesignal\/sources\/scan/);
   assert.match(worker, /\/api\/rolesignal\/sources\/scan-all/);
