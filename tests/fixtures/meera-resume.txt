@@ -1,0 +1,12 @@
+Meera Iyer
+meera.iyer@example.com
+Frontend Engineer
+
+4 years of professional experience building accessible web applications.
+
+Skills
+JavaScript, TypeScript, React, CSS, Playwright
+
+Experience
+- Built accessible React design systems used across 12 customer-facing products.
+- Improved web performance by 35% through bundle analysis and component redesign.

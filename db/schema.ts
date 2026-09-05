@@ -15,6 +15,8 @@ export const resumes = sqliteTable("resumes", {
   contentType: text("content_type").notNull(),
   sizeBytes: integer("size_bytes").notNull(),
   status: text("status").notNull(),
+  version: integer("version").notNull(),
+  profileVersionId: text("profile_version_id"),
   createdAt: text("created_at").notNull(),
 }, (table) => [index("idx_resumes_user_id").on(table.userId)]);
 
@@ -55,11 +57,27 @@ export const applications = sqliteTable("applications", {
 export const careerProfiles = sqliteTable("career_profiles", {
   userId: text("user_id").primaryKey(),
   resumeId: text("resume_id"),
+  activeProfileVersionId: text("active_profile_version_id"),
   rawText: text("raw_text").notNull(),
   extractedJson: text("extracted_json").notNull(),
   status: text("status").notNull(),
   updatedAt: text("updated_at").notNull(),
 });
+
+export const careerProfileVersions = sqliteTable("career_profile_versions", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull(),
+  resumeId: text("resume_id"),
+  version: integer("version").notNull(),
+  status: text("status").notNull(),
+  rawText: text("raw_text").notNull(),
+  extractedJson: text("extracted_json").notNull(),
+  createdAt: text("created_at").notNull(),
+  activatedAt: text("activated_at"),
+}, (table) => [
+  uniqueIndex("idx_profile_versions_user_version").on(table.userId, table.version),
+  index("idx_profile_versions_user_status").on(table.userId, table.status),
+]);
 
 export const jobSources = sqliteTable("job_sources", {
   id: text("id").primaryKey(),
@@ -78,6 +96,8 @@ export const jobMatches = sqliteTable("job_matches", {
   id: text("id").primaryKey(),
   userId: text("user_id").notNull(),
   sourceId: text("source_id"),
+  profileVersionId: text("profile_version_id"),
+  resumeId: text("resume_id"),
   fingerprint: text("fingerprint").notNull(),
   company: text("company").notNull(),
   role: text("role").notNull(),
@@ -104,6 +124,8 @@ export const applicationPackets = sqliteTable("application_packets", {
   id: text("id").primaryKey(),
   userId: text("user_id").notNull(),
   jobId: text("job_id").notNull(),
+  profileVersionId: text("profile_version_id"),
+  resumeId: text("resume_id"),
   status: text("status").notNull(),
   answersJson: text("answers_json").notNull(),
   blockersJson: text("blockers_json").notNull(),
@@ -162,6 +184,8 @@ export const applicationKits = sqliteTable("application_kits", {
   userId: text("user_id").notNull(),
   jobId: text("job_id").notNull(),
   packetId: text("packet_id").notNull(),
+  profileVersionId: text("profile_version_id"),
+  resumeId: text("resume_id"),
   summary: text("summary").notNull(),
   whyAnswer: text("why_answer").notNull(),
   resumeChangesJson: text("resume_changes_json").notNull(),
@@ -244,11 +268,43 @@ export const jobAlerts = sqliteTable("job_alerts", {
   index("idx_job_alerts_user_status_created").on(table.userId, table.status, table.createdAt),
 ]);
 
+export const alertImports = sqliteTable("alert_imports", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull(),
+  provider: text("provider").notNull(),
+  messageKey: text("message_key").notNull(),
+  subject: text("subject").notNull(),
+  status: text("status").notNull(),
+  jobsFound: integer("jobs_found").notNull(),
+  imported: integer("imported").notNull(),
+  duplicates: integer("duplicates").notNull(),
+  createdAt: text("created_at").notNull(),
+}, (table) => [
+  uniqueIndex("idx_alert_imports_user_message").on(table.userId, table.messageKey),
+  index("idx_alert_imports_user_created").on(table.userId, table.createdAt),
+]);
+
+export const sourceHealth = sqliteTable("source_health", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull(),
+  provider: text("provider").notNull(),
+  status: text("status").notNull(),
+  responseCount: integer("response_count").notNull(),
+  acceptedCount: integer("accepted_count").notNull(),
+  latencyMs: integer("latency_ms").notNull(),
+  lastError: text("last_error"),
+  lastAttemptAt: text("last_attempt_at").notNull(),
+  lastSuccessAt: text("last_success_at"),
+}, (table) => [
+  uniqueIndex("idx_source_health_user_provider").on(table.userId, table.provider),
+]);
+
 export const tailoredDocuments = sqliteTable("tailored_documents", {
   id: text("id").primaryKey(),
   userId: text("user_id").notNull(),
   jobId: text("job_id").notNull(),
   resumeId: text("resume_id"),
+  profileVersionId: text("profile_version_id"),
   version: integer("version").notNull(),
   status: text("status").notNull(),
   title: text("title").notNull(),
@@ -295,6 +351,8 @@ export const applicationExecutions = sqliteTable("application_executions", {
   jobId: text("job_id").notNull(),
   packetId: text("packet_id").notNull(),
   documentId: text("document_id"),
+  profileVersionId: text("profile_version_id"),
+  resumeId: text("resume_id"),
   deviceId: text("device_id"),
   platform: text("platform").notNull(),
   mode: text("mode").notNull(),

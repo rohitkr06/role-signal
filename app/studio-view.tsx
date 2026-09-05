@@ -34,7 +34,7 @@ export type StudioDocument = {
   approvedAt?: string;
 };
 
-type StudioJob = { id: string; company: string; role: string; score: number; isSample?: boolean };
+type StudioJob = { id: string; company: string; role: string; score: number };
 
 type Props = {
   documents: StudioDocument[];
@@ -87,7 +87,7 @@ export function StudioView({ documents, jobs, selectedId, busy, onSelect, onGene
   return (
     <div className="page inner-page studio-page">
       <section className="studio-titlebar">
-        <div><span className="eyebrow">Phase 6 / Tailored Application Studio</span><h1>Turn verified evidence into a sharper application.</h1><p>Create a role-specific resume, cover note and written answers. Every claim remains connected to resume evidence before export.</p></div>
+        <div><span className="eyebrow">Tailored application studio</span><h1>Turn verified evidence into a sharper application.</h1><p>Create a role-specific resume, cover note and written answers. Every claim remains connected to the active resume version before export.</p></div>
         <div className="studio-create-control"><label>Build for<select value={selectedJobId} onChange={(event) => setJobId(event.target.value)}>{jobs.length ? jobs.map((job) => <option key={job.id} value={job.id}>{job.company} / {job.role} / {job.score}</option>) : <option value="">Prepare a live match first</option>}</select></label><button className="primary-button" disabled={!selectedJobId || busy === "studio-generate"} onClick={() => void onGenerate(selectedJobId)}><span>+</span>{busy === "studio-generate" ? "Building..." : active?.jobId === selectedJobId ? "Create new version" : "Generate tailored version"}</button></div>
       </section>
 

@@ -2,7 +2,7 @@
 import { handleImageOptimization, DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES } from "vinext/server/image-optimization";
 import handler from "vinext/server/app-router-entry";
 import {
-  ROHIT_PROFILE,
+  EMPTY_PROFILE,
   inferPlatform,
   inferWorkMode,
   profileFromResumeText,
@@ -33,6 +33,11 @@ interface Env {
   ASSETS: Fetcher;
   DB: D1Database;
   RESUMES: R2Bucket;
+  ADZUNA_APP_ID?: string;
+  ADZUNA_APP_KEY?: string;
+  JOOBLE_API_KEY?: string;
+  SERPAPI_API_KEY?: string;
+  INBOUND_EMAIL_SECRET?: string;
   IMAGES: {
     input(stream: ReadableStream): {
       transform(options: Record<string, unknown>): {
@@ -95,6 +100,8 @@ const schemaStatements = [
     content_type TEXT NOT NULL,
     size_bytes INTEGER NOT NULL,
     status TEXT NOT NULL,
+    version INTEGER NOT NULL DEFAULT 1,
+    profile_version_id TEXT,
     created_at TEXT NOT NULL
   )`,
   `CREATE TABLE IF NOT EXISTS preferences (
@@ -131,10 +138,22 @@ const schemaStatements = [
   `CREATE TABLE IF NOT EXISTS career_profiles (
     user_id TEXT PRIMARY KEY,
     resume_id TEXT,
+    active_profile_version_id TEXT,
     raw_text TEXT NOT NULL,
     extracted_json TEXT NOT NULL,
     status TEXT NOT NULL,
     updated_at TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS career_profile_versions (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    resume_id TEXT,
+    version INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    raw_text TEXT NOT NULL,
+    extracted_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    activated_at TEXT
   )`,
   `CREATE TABLE IF NOT EXISTS job_sources (
     id TEXT PRIMARY KEY,
@@ -150,6 +169,8 @@ const schemaStatements = [
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL,
     source_id TEXT,
+    profile_version_id TEXT,
+    resume_id TEXT,
     fingerprint TEXT NOT NULL,
     company TEXT NOT NULL,
     role TEXT NOT NULL,
@@ -171,6 +192,8 @@ const schemaStatements = [
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL,
     job_id TEXT NOT NULL,
+    profile_version_id TEXT,
+    resume_id TEXT,
     status TEXT NOT NULL,
     answers_json TEXT NOT NULL,
     blockers_json TEXT NOT NULL,
@@ -218,6 +241,8 @@ const schemaStatements = [
     user_id TEXT NOT NULL,
     job_id TEXT NOT NULL,
     packet_id TEXT NOT NULL,
+    profile_version_id TEXT,
+    resume_id TEXT,
     summary TEXT NOT NULL,
     why_answer TEXT NOT NULL,
     resume_changes_json TEXT NOT NULL,
@@ -281,11 +306,36 @@ const schemaStatements = [
     created_at TEXT NOT NULL,
     read_at TEXT
   )`,
+  `CREATE TABLE IF NOT EXISTS alert_imports (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    message_key TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    status TEXT NOT NULL,
+    jobs_found INTEGER NOT NULL,
+    imported INTEGER NOT NULL,
+    duplicates INTEGER NOT NULL,
+    created_at TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS source_health (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    status TEXT NOT NULL,
+    response_count INTEGER NOT NULL,
+    accepted_count INTEGER NOT NULL,
+    latency_ms INTEGER NOT NULL,
+    last_error TEXT,
+    last_attempt_at TEXT NOT NULL,
+    last_success_at TEXT
+  )`,
   `CREATE TABLE IF NOT EXISTS tailored_documents (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL,
     job_id TEXT NOT NULL,
     resume_id TEXT,
+    profile_version_id TEXT,
     version INTEGER NOT NULL,
     status TEXT NOT NULL,
     title TEXT NOT NULL,
@@ -322,6 +372,8 @@ const schemaStatements = [
     job_id TEXT NOT NULL,
     packet_id TEXT NOT NULL,
     document_id TEXT,
+    profile_version_id TEXT,
+    resume_id TEXT,
     device_id TEXT,
     platform TEXT NOT NULL,
     mode TEXT NOT NULL,
@@ -338,6 +390,8 @@ const schemaStatements = [
     submitted_at TEXT
   )`,
   `CREATE INDEX IF NOT EXISTS idx_resumes_user_id ON resumes(user_id)`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_profile_versions_user_version ON career_profile_versions(user_id, version)`,
+  `CREATE INDEX IF NOT EXISTS idx_profile_versions_user_status ON career_profile_versions(user_id, status)`,
   `CREATE INDEX IF NOT EXISTS idx_jobs_match_score ON jobs(match_score DESC)`,
   `CREATE INDEX IF NOT EXISTS idx_applications_user_status ON applications(user_id, status)`,
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_job_sources_user_provider_token ON job_sources(user_id, provider, source_token)`,
@@ -358,6 +412,9 @@ const schemaStatements = [
   `CREATE INDEX IF NOT EXISTS idx_automation_settings_due ON automation_settings(enabled, next_run_at)`,
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_job_alerts_user_job_kind ON job_alerts(user_id, job_id, kind)`,
   `CREATE INDEX IF NOT EXISTS idx_job_alerts_user_status_created ON job_alerts(user_id, status, created_at DESC)`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_alert_imports_user_message ON alert_imports(user_id, message_key)`,
+  `CREATE INDEX IF NOT EXISTS idx_alert_imports_user_created ON alert_imports(user_id, created_at DESC)`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_source_health_user_provider ON source_health(user_id, provider)`,
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_tailored_documents_user_job_version ON tailored_documents(user_id, job_id, version)`,
   `CREATE INDEX IF NOT EXISTS idx_tailored_documents_user_updated ON tailored_documents(user_id, updated_at DESC)`,
   `CREATE INDEX IF NOT EXISTS idx_tailored_documents_user_job_status ON tailored_documents(user_id, job_id, status)`,
@@ -370,19 +427,38 @@ const schemaStatements = [
 
 async function ensureSchema(env: Env) {
   await env.DB.batch(schemaStatements.map((sql) => env.DB.prepare(sql)));
+  const requiredColumns: Array<[string, string, string]> = [
+    ["resumes", "version", "INTEGER NOT NULL DEFAULT 1"],
+    ["resumes", "profile_version_id", "TEXT"],
+    ["career_profiles", "active_profile_version_id", "TEXT"],
+    ["job_matches", "profile_version_id", "TEXT"],
+    ["job_matches", "resume_id", "TEXT"],
+    ["application_packets", "profile_version_id", "TEXT"],
+    ["application_packets", "resume_id", "TEXT"],
+    ["application_kits", "profile_version_id", "TEXT"],
+    ["application_kits", "resume_id", "TEXT"],
+    ["tailored_documents", "profile_version_id", "TEXT"],
+    ["application_executions", "profile_version_id", "TEXT"],
+    ["application_executions", "resume_id", "TEXT"],
+  ];
+  for (const [table, column, definition] of requiredColumns) {
+    const info = await env.DB.prepare(`PRAGMA table_info(${table})`).all<Record<string, unknown>>();
+    if (!info.results.some((row) => row.name === column)) await env.DB.prepare(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`).run();
+  }
   await env.DB.prepare("PRAGMA optimize").run();
 }
 
 function currentUser(request: Request) {
   const encodedName = request.headers.get("oai-authenticated-user-full-name");
   const encoding = request.headers.get("oai-authenticated-user-full-name-encoding");
-  let name = "Rohit Kumar";
+  const email = request.headers.get("oai-authenticated-user-email") ?? "";
+  let name = email ? email.split("@")[0].replace(/[._-]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase()) : "RoleSignal user";
   if (encodedName) {
     try { name = encoding === "percent-encoded-utf-8" ? decodeURIComponent(encodedName) : encodedName; } catch { name = encodedName; }
   }
   return {
     id: request.headers.get("oai-authenticated-user-id") ?? "local-preview-user",
-    email: request.headers.get("oai-authenticated-user-email") ?? "",
+    email,
     name,
   };
 }
@@ -405,6 +481,8 @@ function rowToJob(row: Record<string, unknown>) {
   return {
     ...scored,
     id: row.id,
+    profileVersionId: row.profile_version_id,
+    resumeId: row.resume_id,
     company: row.company,
     role: row.role,
     location: row.location,
@@ -425,6 +503,8 @@ function rowToPacket(row: Record<string, unknown>) {
   const packet = {
     id: row.id,
     jobId: row.job_id,
+    profileVersionId: row.profile_version_id,
+    resumeId: row.resume_id,
     status: row.status,
     answers: parseJson(row.answers_json, {}),
     blockers: parseJson(row.blockers_json, []),
@@ -533,11 +613,25 @@ function rowToAlert(row: Record<string, unknown>) {
   };
 }
 
+function rowToAlertImport(row: Record<string, unknown>) {
+  return {
+    id: row.id,
+    provider: row.provider,
+    subject: row.subject,
+    status: row.status,
+    jobsFound: Number(row.jobs_found),
+    imported: Number(row.imported),
+    duplicates: Number(row.duplicates),
+    createdAt: row.created_at,
+  };
+}
+
 function rowToStudioDocument(row: Record<string, unknown>) {
   return {
     id: row.id,
     jobId: row.job_id,
     resumeId: row.resume_id,
+    profileVersionId: row.profile_version_id,
     version: Number(row.version),
     status: row.status,
     title: row.title,
@@ -561,7 +655,7 @@ function rowToExecutionSettings(row?: Record<string, unknown> | null) {
     enabled: Boolean(row?.enabled),
     minScore: Number(row?.min_score ?? 75),
     dailyLimit: Number(row?.daily_limit ?? 5),
-    mode: row?.mode === "AUTO_SUBMIT" ? "AUTO_SUBMIT" : "FILL_ONLY",
+    mode: "FILL_ONLY",
     requireTailoredResume: row ? Boolean(row.require_tailored_resume) : false,
     updatedAt: row?.updated_at ?? null,
   };
@@ -583,6 +677,8 @@ function rowToExecution(row: Record<string, unknown>) {
     jobId: row.job_id,
     packetId: row.packet_id,
     documentId: row.document_id,
+    profileVersionId: row.profile_version_id,
+    resumeId: row.resume_id,
     deviceId: row.device_id,
     platform: row.platform,
     mode: row.mode,
@@ -640,14 +736,14 @@ async function companionDeviceForRequest(request: Request, env: Env) {
   ).bind(hash).first<Record<string, unknown>>();
 }
 
-async function executionRows(env: Env, userId: string) {
+async function executionRows(env: Env, userId: string, profileVersionId: string) {
   const result = await env.DB.prepare(
     `SELECT e.*, j.company, j.role, j.location, j.match_score, d.version AS document_version
      FROM application_executions e
      JOIN job_matches j ON j.id = e.job_id
      LEFT JOIN tailored_documents d ON d.id = e.document_id
-     WHERE e.user_id = ? ORDER BY e.updated_at DESC LIMIT 100`,
-  ).bind(userId).all<Record<string, unknown>>();
+     WHERE e.user_id = ? AND e.profile_version_id = ? ORDER BY e.updated_at DESC LIMIT 100`,
+  ).bind(userId, profileVersionId).all<Record<string, unknown>>();
   return result.results.map(rowToExecution);
 }
 
@@ -695,14 +791,15 @@ function safeStudioContent(value: unknown): StudioContent {
 
 async function studioSources(env: Env, user: { id: string; email: string; name: string }) {
   const row = await env.DB.prepare(
-    "SELECT resume_id, raw_text, extracted_json FROM career_profiles WHERE user_id = ?",
+    `SELECT v.id AS profile_version_id, v.resume_id, v.raw_text, v.extracted_json
+     FROM career_profiles p JOIN career_profile_versions v ON v.id = p.active_profile_version_id
+     WHERE p.user_id = ? AND v.user_id = p.user_id AND v.status = 'ACTIVE'`,
   ).bind(user.id).first<Record<string, unknown>>();
+  if (!row) throw new Error("Confirm your resume profile before creating tailored documents.");
   const rawText = asString(row?.raw_text).slice(0, 200_000);
-  const stored = parseJson<CandidateProfile>(row?.extracted_json, { ...ROHIT_PROFILE, name: user.name, email: user.email });
-  const reparsed = rawText ? profileFromResumeText(rawText, stored.name || user.name, stored.email || user.email) : null;
-  const profile = reparsed ? { ...stored, ...reparsed, name: reparsed.name || user.name, email: reparsed.email || user.email } : await profileForUser(env, user);
+  const profile = parseJson<CandidateProfile>(row?.extracted_json, EMPTY_PROFILE);
   const vault = await answersForUser(env, user.id);
-  return { resumeId: asString(row?.resume_id), rawText, profile, vault: vault.values };
+  return { profileVersionId: asString(row?.profile_version_id), resumeId: asString(row?.resume_id), rawText, profile, vault: vault.values };
 }
 
 const answerDefinitions = {
@@ -754,8 +851,8 @@ function buildApplicationKit(
   const strongest = evidence.slice(0, 3).join(", ").replace(/, ([^,]*)$/, " and $1");
   const role = asString(job.role);
   const company = asString(job.company);
-  const summary = `Use the default resume${scored.resumeFit === "CUSTOMIZE" ? " with targeted evidence ordering" : ""}. Lead with ${strongest || "verified backend delivery and production ownership"}.`;
-  const whyAnswer = `This ${role} role aligns with my production work in ${strongest || "backend systems and reliability"}. At SaaS Labs / JustCall, I have owned systems from architecture through scaling and incident response, and I am interested in applying that same engineering depth to ${company}'s product challenges.`;
+  const summary = `Use the active verified resume${scored.resumeFit === "CUSTOMIZE" ? " with targeted evidence ordering" : ""}. Lead with ${strongest || profile.title || "the most relevant verified experience"}.`;
+  const whyAnswer = `This ${role} role aligns with my verified experience in ${strongest || profile.title || "software engineering"}. I am interested in applying that experience to ${company}'s product and engineering challenges.`;
   return {
     packetId,
     summary,
@@ -792,41 +889,95 @@ function csvCell(value: unknown) {
 
 async function profileForUser(env: Env, user: { id: string; email: string; name: string }) {
   const row = await env.DB.prepare(
-    "SELECT extracted_json FROM career_profiles WHERE user_id = ?",
+    `SELECT v.id AS profile_version_id, v.resume_id, v.extracted_json
+     FROM career_profiles p
+     JOIN career_profile_versions v ON v.id = p.active_profile_version_id AND v.user_id = p.user_id
+     WHERE p.user_id = ? AND v.status = 'ACTIVE'`,
   ).bind(user.id).first<Record<string, unknown>>();
-  if (!row?.extracted_json) return { ...ROHIT_PROFILE, name: user.name, email: user.email };
-  const parsed = parseJson<CandidateProfile>(row.extracted_json, ROHIT_PROFILE);
+  if (!row?.extracted_json) return { ...EMPTY_PROFILE, name: "", email: user.email };
+  const parsed = parseJson<CandidateProfile>(row.extracted_json, EMPTY_PROFILE);
   return {
-    ...ROHIT_PROFILE,
+    ...EMPTY_PROFILE,
     ...parsed,
-    name: parsed.name || user.name,
+    name: parsed.name,
     email: parsed.email || user.email,
-    experienceYears: parsed.experienceYears || ROHIT_PROFILE.experienceYears,
-    skills: [...new Set([...ROHIT_PROFILE.skills, ...(parsed.skills ?? [])])],
-    domains: [...new Set([...ROHIT_PROFILE.domains, ...(parsed.domains ?? [])])],
-    evidence: [...new Set([...(parsed.evidence ?? []), ...ROHIT_PROFILE.evidence])].slice(0, 12),
+    experienceYears: parsed.experienceYears || 0,
+    skills: [...new Set(parsed.skills ?? [])],
+    domains: [...new Set(parsed.domains ?? [])],
+    evidence: [...new Set(parsed.evidence ?? [])].slice(0, 20),
   } satisfies CandidateProfile;
 }
 
+async function activeEvidenceForUser(env: Env, userId: string) {
+  const row = await env.DB.prepare(
+    `SELECT v.id AS profile_version_id, v.resume_id, v.version, v.extracted_json, v.activated_at
+     FROM career_profiles p
+     JOIN career_profile_versions v ON v.id = p.active_profile_version_id AND v.user_id = p.user_id
+     WHERE p.user_id = ? AND v.status = 'ACTIVE'`,
+  ).bind(userId).first<Record<string, unknown>>();
+  if (!row) return null;
+  return {
+    profileVersionId: asString(row.profile_version_id),
+    resumeId: asString(row.resume_id),
+    version: Number(row.version),
+    activatedAt: asString(row.activated_at),
+    profile: parseJson<CandidateProfile>(row.extracted_json, EMPTY_PROFILE),
+  };
+}
+
+async function requireActiveEvidence(env: Env, userId: string) {
+  const active = await activeEvidenceForUser(env, userId);
+  if (!active) throw new Error("Review and confirm your resume profile before discovering or applying to jobs.");
+  return active;
+}
+
+async function pendingProfileForUser(env: Env, userId: string) {
+  const row = await env.DB.prepare(
+    `SELECT id, resume_id, version, status, extracted_json, created_at
+     FROM career_profile_versions WHERE user_id = ? AND status = 'PENDING_REVIEW'
+     ORDER BY version DESC LIMIT 1`,
+  ).bind(userId).first<Record<string, unknown>>();
+  if (!row) return null;
+  return {
+    id: row.id,
+    resumeId: row.resume_id,
+    version: Number(row.version),
+    status: row.status,
+    profile: parseJson<CandidateProfile>(row.extracted_json, EMPTY_PROFILE),
+    createdAt: row.created_at,
+  };
+}
+
+async function assertCurrentEvidence(env: Env, userId: string, profileVersionId: unknown) {
+  const active = await requireActiveEvidence(env, userId);
+  if (!profileVersionId || profileVersionId !== active.profileVersionId) {
+    throw new Error("This item was created from an older resume. Rebuild it from your active verified profile.");
+  }
+  return active;
+}
+
 async function saveScoredJob(env: Env, userId: string, scored: ScoredJob, sourceId: string | null, now: string) {
+  const active = await requireActiveEvidence(env, userId);
   const existing = await env.DB.prepare(
     "SELECT * FROM job_matches WHERE user_id = ? AND fingerprint = ?",
   ).bind(userId, scored.fingerprint).first<Record<string, unknown>>();
   const id = asString(existing?.id) || crypto.randomUUID();
   const officialPlatforms = new Set(["Company site", "Greenhouse", "Lever", "Ashby"]);
-  if (existing && officialPlatforms.has(asString(existing.platform)) && !officialPlatforms.has(scored.platform ?? "")) {
+  if (existing && existing.profile_version_id === active.profileVersionId && officialPlatforms.has(asString(existing.platform)) && !officialPlatforms.has(scored.platform ?? "")) {
     return { id, duplicate: true, applicationUrl: asString(existing.application_url), preserved: true };
   }
   const shouldPreferNewUrl = !existing || officialPlatforms.has(scored.platform ?? "");
   const applicationUrl = shouldPreferNewUrl ? scored.applicationUrl : asString(existing.application_url, scored.applicationUrl);
   await env.DB.prepare(
     `INSERT INTO job_matches
-     (id, user_id, source_id, fingerprint, company, role, location, work_mode, platform,
-      application_url, posted_date, description, compensation, match_score, classification,
-      status, score_json, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     (id, user_id, source_id, profile_version_id, resume_id, fingerprint, company, role, location, work_mode, platform,
+       application_url, posted_date, description, compensation, match_score, classification,
+       status, score_json, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(user_id, fingerprint) DO UPDATE SET
        source_id = excluded.source_id,
+       profile_version_id = excluded.profile_version_id,
+       resume_id = excluded.resume_id,
        work_mode = excluded.work_mode,
        platform = excluded.platform,
        application_url = excluded.application_url,
@@ -839,7 +990,7 @@ async function saveScoredJob(env: Env, userId: string, scored: ScoredJob, source
        score_json = excluded.score_json,
        updated_at = excluded.updated_at`,
   ).bind(
-    id, userId, sourceId, scored.fingerprint, scored.company, scored.role, scored.location,
+    id, userId, sourceId, active.profileVersionId, active.resumeId || null, scored.fingerprint, scored.company, scored.role, scored.location,
     scored.workMode ?? "Not specified", scored.platform ?? "Company site", applicationUrl,
     scored.postedDate ?? null, scored.description, scored.compensation ?? null, scored.score,
     scored.classification, scored.status, JSON.stringify({ ...scored, applicationUrl }), now, now,
@@ -886,6 +1037,26 @@ async function safeFetch(urlValue: string, accept = "text/html,application/json"
       return response;
     }
     throw new Error("The job source could not be reached.");
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function safeJsonFetch(urlValue: string, init: RequestInit = {}) {
+  let target: URL;
+  try { target = new URL(urlValue); } catch { throw new Error("The discovery provider URL is invalid."); }
+  if (target.protocol !== "https:" || isPrivateHostname(target.hostname)) throw new Error("Only public HTTPS discovery providers are supported.");
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15_000);
+  try {
+    const headers = new Headers(init.headers);
+    headers.set("accept", "application/json");
+    headers.set("user-agent", "RoleSignal/8.0 unified job discovery");
+    const response = await fetch(target, { ...init, headers, redirect: "error", signal: controller.signal });
+    if (!response.ok) throw new Error(`The discovery provider returned ${response.status}.`);
+    const length = Number(response.headers.get("content-length") ?? 0);
+    if (length > 4_000_000) throw new Error("The discovery response is too large to process safely.");
+    return response;
   } finally {
     clearTimeout(timer);
   }
@@ -1323,6 +1494,63 @@ type ArbeitnowJob = {
   created_at?: number;
 };
 
+type AdzunaJob = {
+  id?: string;
+  title?: string;
+  description?: string;
+  redirect_url?: string;
+  created?: string;
+  company?: { display_name?: string };
+  location?: { display_name?: string };
+  salary_min?: number;
+  salary_max?: number;
+};
+
+type JoobleJob = {
+  id?: string | number;
+  title?: string;
+  company?: string;
+  location?: string;
+  snippet?: string;
+  salary?: string;
+  source?: string;
+  type?: string;
+  link?: string;
+  updated?: string;
+};
+
+type GoogleJob = {
+  title?: string;
+  company_name?: string;
+  location?: string;
+  description?: string;
+  share_link?: string;
+  via?: string;
+  detected_extensions?: { posted_at?: string; schedule_type?: string; work_from_home?: boolean };
+  apply_options?: Array<{ title?: string; link?: string }>;
+};
+
+type DiscoveryProviderResult = {
+  provider: string;
+  discovered: number;
+  candidates: JobInput[];
+};
+
+type DiscoverySourceStatus = {
+  id: string;
+  name: string;
+  lane: "PUBLIC_API" | "COMPANY_ATS" | "PORTAL_ALERTS" | "OPTIONAL_INDEX";
+  status: "LIVE" | "CONNECTED" | "READY" | "NEEDS_KEY" | "NEVER_TESTED" | "DEGRADED" | "UNAVAILABLE";
+  coverage: string;
+  note: string;
+  responseCount?: number;
+  acceptedCount?: number;
+  latencyMs?: number;
+  lastAttemptAt?: string | null;
+  lastSuccessAt?: string | null;
+  lastError?: string | null;
+};
+
 function stringList(value: unknown, fallback: string[]) {
   const source = Array.isArray(value) ? value : typeof value === "string" ? value.split(",") : fallback;
   return [...new Set(source.map((item) => asString(item).slice(0, 80)).filter(Boolean))].slice(0, 12);
@@ -1453,12 +1681,152 @@ async function createJobAlerts(
   return results.reduce((total, result) => total + Number(result.meta?.changes ?? 0), 0);
 }
 
+function discoverySources(env: Env, connectedBoards: number, healthRows: Record<string, unknown>[] = []): DiscoverySourceStatus[] {
+  const health = new Map(healthRows.map((row) => [asString(row.provider), row]));
+  const automatic = (id: string, name: string, coverage: string, configured = true, needsKey = "") => {
+    const row = health.get(name);
+    if (!configured) return { id, name, lane: "PUBLIC_API" as const, status: "NEEDS_KEY" as const, coverage, note: needsKey };
+    if (!row) return { id, name, lane: "PUBLIC_API" as const, status: "NEVER_TESTED" as const, coverage, note: "Run discovery to verify this source" };
+    return {
+      id, name, lane: "PUBLIC_API" as const, status: asString(row.status) as DiscoverySourceStatus["status"], coverage,
+      note: row.last_error ? asString(row.last_error) : `${Number(row.response_count)} received / ${Number(row.accepted_count)} relevant`,
+      responseCount: Number(row.response_count), acceptedCount: Number(row.accepted_count), latencyMs: Number(row.latency_ms),
+      lastAttemptAt: asString(row.last_attempt_at) || null, lastSuccessAt: asString(row.last_success_at) || null, lastError: asString(row.last_error) || null,
+    };
+  };
+  return [
+    automatic("jobicy", "Jobicy", "Remote / APAC"),
+    automatic("arbeitnow", "Arbeitnow", "Aggregated company jobs"),
+    automatic("adzuna", "Adzuna India", "India-wide listings", Boolean(env.ADZUNA_APP_ID && env.ADZUNA_APP_KEY), "Add ADZUNA_APP_ID and ADZUNA_APP_KEY"),
+    automatic("jooble", "Jooble", "India + wider web", Boolean(env.JOOBLE_API_KEY), "Add JOOBLE_API_KEY"),
+    { id: "company-ats", name: "Official company boards", lane: "COMPANY_ATS", status: connectedBoards ? "CONNECTED" : "READY", coverage: `${connectedBoards} Greenhouse / Lever / Ashby board${connectedBoards === 1 ? "" : "s"}`, note: connectedBoards ? "Scanned with every run" : "Add target employers when useful" },
+    { id: "portal-alerts", name: "Portal alert inbox", lane: "PORTAL_ALERTS", status: "READY", coverage: "LinkedIn, Naukri, Indeed, Foundit", note: "Imports alerts without signing into portals" },
+    { ...automatic("google-jobs", "Google Jobs", "Broad India web index", Boolean(env.SERPAPI_API_KEY), "Optional SERPAPI_API_KEY"), lane: "OPTIONAL_INDEX" },
+  ];
+}
+
+async function recordSourceHealth(env: Env, userId: string, provider: string, status: "LIVE" | "DEGRADED" | "UNAVAILABLE", responseCount: number, acceptedCount: number, latencyMs: number, error: string | null, now: string) {
+  await env.DB.prepare(
+    `INSERT INTO source_health (id, user_id, provider, status, response_count, accepted_count, latency_ms, last_error, last_attempt_at, last_success_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(user_id, provider) DO UPDATE SET status = excluded.status, response_count = excluded.response_count,
+       accepted_count = excluded.accepted_count, latency_ms = excluded.latency_ms, last_error = excluded.last_error,
+       last_attempt_at = excluded.last_attempt_at, last_success_at = COALESCE(excluded.last_success_at, source_health.last_success_at)`,
+  ).bind(crypto.randomUUID(), userId, provider, status, responseCount, acceptedCount, latencyMs, error, now, status === "LIVE" ? now : null).run();
+}
+
+function primaryDiscoveryQuery(config: DiscoveryConfig) {
+  return config.keywords.slice(0, 4).join(" OR ") || "software engineer";
+}
+
+async function fetchJobicyDiscovery(config: DiscoveryConfig): Promise<DiscoveryProviderResult> {
+  const keyword = config.keywords[0]?.replace(/\b(engineer|engineering|developer)\b/gi, "").trim() || "backend";
+  const url = new URL("https://jobicy.com/api/v2/remote-jobs");
+  url.searchParams.set("count", "100");
+  url.searchParams.set("geo", "apac");
+  url.searchParams.set("industry", "engineering");
+  url.searchParams.set("tag", keyword);
+  const payload = await safeJsonFetch(url.toString()).then((response) => response.json() as Promise<{ jobs?: JobicyJob[] }>);
+  const jobs = payload.jobs ?? [];
+  const candidates = jobs.map((job): JobInput => ({
+    externalId: String(job.id ?? job.url ?? ""), company: asString(job.companyName, "Unknown company"),
+    role: asString(job.jobTitle, "Untitled role"), location: asString(job.jobGeo, "Remote"), workMode: "Remote",
+    platform: "Jobicy", applicationUrl: asString(job.url), postedDate: asString(job.pubDate),
+    description: stripHtml(asString(job.jobDescription, asString(job.jobExcerpt))), compensation: compensationFromJobicy(job),
+  })).filter((job) => job.applicationUrl && isDiscoveryCandidate(job, config));
+  return { provider: "Jobicy", discovered: jobs.length, candidates };
+}
+
+async function fetchArbeitnowDiscovery(config: DiscoveryConfig): Promise<DiscoveryProviderResult> {
+  const payload = await safeJsonFetch("https://www.arbeitnow.com/api/job-board-api?page=1").then((response) => response.json() as Promise<{ data?: ArbeitnowJob[] }>);
+  const jobs = payload.data ?? [];
+  const candidates = jobs.map((job): JobInput => ({
+    externalId: asString(job.slug, asString(job.url)), company: asString(job.company_name, "Unknown company"),
+    role: asString(job.title, "Untitled role"), location: asString(job.location, job.remote ? "Remote" : "Not specified"),
+    workMode: job.remote ? "Remote" : inferWorkMode(asString(job.location), asString(job.description)), platform: "Arbeitnow",
+    applicationUrl: asString(job.url), postedDate: job.created_at ? new Date(job.created_at * 1000).toISOString() : "",
+    description: stripHtml(asString(job.description)),
+  })).filter((job) => job.applicationUrl && isDiscoveryCandidate(job, config));
+  return { provider: "Arbeitnow", discovered: jobs.length, candidates };
+}
+
+async function fetchAdzunaDiscovery(config: DiscoveryConfig, env: Env): Promise<DiscoveryProviderResult> {
+  if (!env.ADZUNA_APP_ID || !env.ADZUNA_APP_KEY) throw new Error("Adzuna is not connected.");
+  const url = new URL("https://api.adzuna.com/v1/api/jobs/in/search/1");
+  url.searchParams.set("app_id", env.ADZUNA_APP_ID);
+  url.searchParams.set("app_key", env.ADZUNA_APP_KEY);
+  url.searchParams.set("results_per_page", "50");
+  url.searchParams.set("what", primaryDiscoveryQuery(config));
+  url.searchParams.set("sort_by", "date");
+  url.searchParams.set("max_days_old", "30");
+  url.searchParams.set("content-type", "application/json");
+  const payload = await safeJsonFetch(url.toString()).then((response) => response.json() as Promise<{ results?: AdzunaJob[] }>);
+  const jobs = payload.results ?? [];
+  const candidates = jobs.map((job): JobInput => {
+    const location = asString(job.location?.display_name, "India");
+    const description = stripHtml(asString(job.description));
+    const salary = job.salary_min == null && job.salary_max == null ? "" : `INR ${[job.salary_min, job.salary_max].filter((value) => value != null).join("-")}`;
+    return {
+      externalId: asString(job.id, asString(job.redirect_url)), company: asString(job.company?.display_name, "Unknown company"),
+      role: asString(job.title, "Untitled role"), location, workMode: inferWorkMode(location, description), platform: "Adzuna India",
+      applicationUrl: asString(job.redirect_url), postedDate: asString(job.created), description, compensation: salary,
+    };
+  }).filter((job) => job.applicationUrl && isDiscoveryCandidate(job, config));
+  return { provider: "Adzuna India", discovered: jobs.length, candidates };
+}
+
+async function fetchJoobleDiscovery(config: DiscoveryConfig, env: Env): Promise<DiscoveryProviderResult> {
+  if (!env.JOOBLE_API_KEY) throw new Error("Jooble is not connected.");
+  const payload = await safeJsonFetch(`https://jooble.org/api/${encodeURIComponent(env.JOOBLE_API_KEY)}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ keywords: primaryDiscoveryQuery(config), location: "India", page: "1", ResultOnPage: "50" }),
+  }).then((response) => response.json() as Promise<{ jobs?: JoobleJob[] }>);
+  const jobs = payload.jobs ?? [];
+  const candidates = jobs.map((job): JobInput => {
+    const location = asString(job.location, "India");
+    const description = stripHtml(asString(job.snippet));
+    return {
+      externalId: String(job.id ?? job.link ?? ""), company: asString(job.company, "Unknown company"), role: asString(job.title, "Untitled role"),
+      location, workMode: inferWorkMode(location, `${description} ${asString(job.type)}`), platform: "Jooble",
+      applicationUrl: asString(job.link), postedDate: asString(job.updated), description, compensation: asString(job.salary),
+    };
+  }).filter((job) => job.applicationUrl && isDiscoveryCandidate(job, config));
+  return { provider: "Jooble", discovered: jobs.length, candidates };
+}
+
+async function fetchGoogleJobsDiscovery(config: DiscoveryConfig, env: Env): Promise<DiscoveryProviderResult> {
+  if (!env.SERPAPI_API_KEY) throw new Error("Google Jobs index is not connected.");
+  const url = new URL("https://serpapi.com/search.json");
+  url.searchParams.set("engine", "google_jobs");
+  url.searchParams.set("q", `${primaryDiscoveryQuery(config)} jobs`);
+  url.searchParams.set("location", "India");
+  url.searchParams.set("gl", "in");
+  url.searchParams.set("hl", "en");
+  url.searchParams.set("api_key", env.SERPAPI_API_KEY);
+  const payload = await safeJsonFetch(url.toString()).then((response) => response.json() as Promise<{ jobs_results?: GoogleJob[] }>);
+  const jobs = payload.jobs_results ?? [];
+  const candidates = jobs.map((job, index): JobInput => {
+    const location = asString(job.location, "India");
+    const description = stripHtml(asString(job.description));
+    const applicationUrl = asString(job.apply_options?.find((option) => option.link)?.link, asString(job.share_link));
+    return {
+      externalId: applicationUrl || `${job.company_name}-${job.title}-${index}`, company: asString(job.company_name, "Unknown company"),
+      role: asString(job.title, "Untitled role"), location,
+      workMode: job.detected_extensions?.work_from_home ? "Remote" : inferWorkMode(location, `${description} ${asString(job.detected_extensions?.schedule_type)}`),
+      platform: "Google Jobs", applicationUrl, postedDate: asString(job.detected_extensions?.posted_at), description,
+    };
+  }).filter((job) => job.applicationUrl && isDiscoveryCandidate(job, config));
+  return { provider: "Google Jobs", discovered: jobs.length, candidates };
+}
+
 async function runDiscovery(
   body: Record<string, unknown>,
   env: Env,
   user: { id: string; email: string; name: string },
   startedAt: string,
 ) {
+  await requireActiveEvidence(env, user.id);
   const config = discoveryConfig(body);
   const mode = body.mode === "SCHEDULED" ? "SCHEDULED" : "PUBLIC_FEEDS";
   const force = body.force === true || mode === "SCHEDULED";
@@ -1478,58 +1846,37 @@ async function runDiscovery(
      VALUES (?, ?, ?, ?, 'RUNNING', '[]', 0, 0, 0, 0, '{}', ?, NULL)`,
   ).bind(runId, user.id, searchId, mode, startedAt).run();
 
-  const keyword = config.keywords[0]?.replace(/\b(engineer|engineering|developer)\b/gi, "").trim() || "backend";
-  const jobicyUrl = new URL("https://jobicy.com/api/v2/remote-jobs");
-  jobicyUrl.searchParams.set("count", "100");
-  jobicyUrl.searchParams.set("geo", "apac");
-  jobicyUrl.searchParams.set("industry", "engineering");
-  jobicyUrl.searchParams.set("tag", keyword);
-
   const providerReports: Array<{ provider: string; discovered: number; relevant: number; imported: number; duplicates: number }> = [];
   const failures: Array<{ provider: string; message: string }> = [];
   const candidates: JobInput[] = [];
-  const feedResults = await Promise.allSettled([
-    safeFetch(jobicyUrl.toString(), "application/json").then((response) => response.json() as Promise<{ jobs?: JobicyJob[] }>),
-    safeFetch("https://www.arbeitnow.com/api/job-board-api?page=1", "application/json").then((response) => response.json() as Promise<{ data?: ArbeitnowJob[] }>),
-  ]);
+  const connectors: Array<{ provider: string; run: () => Promise<DiscoveryProviderResult> }> = [
+    { provider: "Jobicy", run: () => fetchJobicyDiscovery(config) },
+    { provider: "Arbeitnow", run: () => fetchArbeitnowDiscovery(config) },
+  ];
+  if (env.ADZUNA_APP_ID && env.ADZUNA_APP_KEY) connectors.push({ provider: "Adzuna India", run: () => fetchAdzunaDiscovery(config, env) });
+  if (env.JOOBLE_API_KEY) connectors.push({ provider: "Jooble", run: () => fetchJoobleDiscovery(config, env) });
+  if (env.SERPAPI_API_KEY) connectors.push({ provider: "Google Jobs", run: () => fetchGoogleJobsDiscovery(config, env) });
 
-  if (feedResults[0].status === "fulfilled") {
-    const jobs = feedResults[0].value.jobs ?? [];
-    const mapped = jobs.map((job): JobInput => ({
-      externalId: String(job.id ?? job.url ?? ""),
-      company: asString(job.companyName, "Unknown company"),
-      role: asString(job.jobTitle, "Untitled role"),
-      location: asString(job.jobGeo, "Remote"),
-      workMode: "Remote",
-      platform: "Jobicy",
-      applicationUrl: asString(job.url),
-      postedDate: asString(job.pubDate),
-      description: stripHtml(asString(job.jobDescription, asString(job.jobExcerpt))),
-      compensation: compensationFromJobicy(job),
-    })).filter((job) => job.applicationUrl && isDiscoveryCandidate(job, config));
-    candidates.push(...mapped);
-    providerReports.push({ provider: "Jobicy", discovered: jobs.length, relevant: mapped.length, imported: 0, duplicates: 0 });
-  } else {
-    failures.push({ provider: "Jobicy", message: feedResults[0].reason instanceof Error ? feedResults[0].reason.message : "Feed unavailable" });
-  }
-
-  if (feedResults[1].status === "fulfilled") {
-    const jobs = feedResults[1].value.data ?? [];
-    const mapped = jobs.map((job): JobInput => ({
-      externalId: asString(job.slug, asString(job.url)),
-      company: asString(job.company_name, "Unknown company"),
-      role: asString(job.title, "Untitled role"),
-      location: asString(job.location, job.remote ? "Remote" : "Not specified"),
-      workMode: job.remote ? "Remote" : inferWorkMode(asString(job.location), asString(job.description)),
-      platform: "Arbeitnow",
-      applicationUrl: asString(job.url),
-      postedDate: job.created_at ? new Date(job.created_at * 1000).toISOString() : "",
-      description: stripHtml(asString(job.description)),
-    })).filter((job) => job.applicationUrl && isDiscoveryCandidate(job, config));
-    candidates.push(...mapped);
-    providerReports.push({ provider: "Arbeitnow", discovered: jobs.length, relevant: mapped.length, imported: 0, duplicates: 0 });
-  } else {
-    failures.push({ provider: "Arbeitnow", message: feedResults[1].reason instanceof Error ? feedResults[1].reason.message : "Feed unavailable" });
+  const connectorStartedAt = connectors.map(() => Date.now());
+  const feedResults = await Promise.allSettled(connectors.map((connector) => connector.run()));
+  for (let index = 0; index < connectors.length; index += 1) {
+    const connector = connectors[index];
+    const result = feedResults[index];
+    if (result.status === "fulfilled") {
+      await recordSourceHealth(env, user.id, connector.provider, "LIVE", result.value.discovered, result.value.candidates.length, Date.now() - connectorStartedAt[index], null, new Date().toISOString());
+      candidates.push(...result.value.candidates);
+      providerReports.push({
+        provider: result.value.provider,
+        discovered: result.value.discovered,
+        relevant: result.value.candidates.length,
+        imported: 0,
+        duplicates: 0,
+      });
+    } else {
+      const message = result.reason instanceof Error ? result.reason.message : "Feed unavailable";
+      await recordSourceHealth(env, user.id, connector.provider, "UNAVAILABLE", 0, 0, Date.now() - connectorStartedAt[index], message, new Date().toISOString());
+      failures.push({ provider: connector.provider, message });
+    }
   }
 
   const sourceResult = await env.DB.prepare(
@@ -1619,6 +1966,168 @@ async function runDiscovery(
   });
 }
 
+function decodeAlertText(value: string) {
+  return value
+    .replace(/&amp;/gi, "&")
+    .replace(/&quot;/gi, "\"")
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">");
+}
+
+function looksLikeJobLink(value: string) {
+  try {
+    const url = new URL(decodeAlertText(value));
+    if (url.protocol !== "https:" || isPrivateHostname(url.hostname)) return false;
+    const text = `${url.hostname}${url.pathname}`.toLowerCase();
+    if (/unsubscribe|preferences|notification-settings|privacy|help|support|login|signup/.test(text)) return false;
+    return /job|career|position|opening|posting|apply|view/.test(text);
+  } catch {
+    return false;
+  }
+}
+
+function alertJobFromRecord(value: Record<string, unknown>, provider: string): JobInput | null {
+  const applicationUrl = decodeAlertText(asString(value.applicationUrl || value.url || value.link));
+  const role = asString(value.role || value.title).slice(0, 180);
+  if (!role || !looksLikeJobLink(applicationUrl)) return null;
+  const location = asString(value.location, "India").slice(0, 160);
+  const description = stripHtml(asString(value.description || value.snippet || value.cardText, `${role}. Imported from a ${provider} job alert.`)).slice(0, 20_000);
+  return {
+    externalId: asString(value.externalId, applicationUrl),
+    company: asString(value.company, `${provider} listing`).slice(0, 120),
+    role,
+    location,
+    workMode: asString(value.workMode, inferWorkMode(location, description)),
+    platform: provider,
+    applicationUrl,
+    postedDate: asString(value.postedDate || value.updated),
+    description,
+    compensation: asString(value.compensation || value.salary),
+  };
+}
+
+function extractJobsFromAlert(body: Record<string, unknown>, provider: string) {
+  const structured = Array.isArray(body.jobs)
+    ? body.jobs.slice(0, 100).map((value) => alertJobFromRecord(value as Record<string, unknown>, provider)).filter((value): value is JobInput => Boolean(value))
+    : [];
+  if (structured.length) return structured;
+
+  const content = asString(body.content || body.html || body.text).slice(0, 500_000);
+  if (!content) return [];
+  const candidates: JobInput[] = [];
+  const seen = new Set<string>();
+  const addCandidate = (rawUrl: string, rawTitle: string, context: string) => {
+    const applicationUrl = decodeAlertText(rawUrl).replace(/[)>.,]+$/, "");
+    if (!looksLikeJobLink(applicationUrl) || seen.has(applicationUrl)) return;
+    const plainContext = stripHtml(decodeAlertText(context)).replace(/\s+/g, " ").trim();
+    let role = stripHtml(decodeAlertText(rawTitle)).replace(/\s+/g, " ").trim();
+    if (!role || /^(view|open|apply|see|learn|details|view job|apply now)$/i.test(role)) {
+      const contextLines = stripHtml(decodeAlertText(context)).split(/\r?\n|\s{2,}/).map((line) => line.trim()).filter(Boolean);
+      for (let index = contextLines.length - 1; index >= 0; index -= 1) {
+        if (contextLines[index].length >= 5 && contextLines[index].length <= 180 && !/unsubscribe|alert|notification|view job/i.test(contextLines[index])) {
+          role = contextLines[index];
+          break;
+        }
+      }
+    }
+    if (!role || role.length > 180) return;
+    const roleAtCompany = role.match(/^(.+?)\s+at\s+(.+)$/i);
+    const company = roleAtCompany ? roleAtCompany[2].trim() : `${provider} listing`;
+    if (roleAtCompany) role = roleAtCompany[1].trim();
+    const location = plainContext.match(/\b(Remote|India|Bengaluru|Bangalore|Hyderabad|Pune|Gurugram|Gurgaon|Noida|Chennai|Mumbai|Delhi NCR|Delhi)\b/i)?.[0] ?? "India";
+    const description = `${role} at ${company}. ${plainContext}`.slice(0, 4_000);
+    candidates.push({
+      externalId: applicationUrl, company: company.slice(0, 120), role: role.slice(0, 180), location,
+      workMode: inferWorkMode(location, description), platform: provider, applicationUrl, description,
+    });
+    seen.add(applicationUrl);
+  };
+
+  const anchorPattern = /<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+  for (const match of content.matchAll(anchorPattern)) {
+    const index = match.index ?? 0;
+    addCandidate(match[1], match[2], content.slice(Math.max(0, index - 700), Math.min(content.length, index + match[0].length + 700)));
+  }
+  const urlPattern = /https:\/\/[^\s<>"']+/gi;
+  for (const match of content.matchAll(urlPattern)) {
+    const index = match.index ?? 0;
+    addCandidate(match[0], "", content.slice(Math.max(0, index - 700), Math.min(content.length, index + match[0].length + 500)));
+  }
+  return candidates.slice(0, 100);
+}
+
+async function alertMessageKey(body: Record<string, unknown>, provider: string) {
+  const supplied = asString(body.messageId || body.messageKey).trim();
+  if (supplied) return supplied.slice(0, 240);
+  const source = `${provider}\n${asString(body.subject)}\n${asString(body.content || body.html || body.text)}\n${JSON.stringify(body.jobs ?? [])}`;
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(source));
+  return [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, "0")).join("");
+}
+
+async function importPortalAlert(
+  body: Record<string, unknown>,
+  env: Env,
+  user: { id: string; email: string; name: string },
+  startedAt: string,
+) {
+  const provider = asString(body.provider, "Job alert").slice(0, 60);
+  const subject = asString(body.subject, `${provider} job alert`).slice(0, 240);
+  const messageKey = await alertMessageKey(body, provider);
+  const existing = await env.DB.prepare(
+    "SELECT * FROM alert_imports WHERE user_id = ? AND message_key = ?",
+  ).bind(user.id, messageKey).first<Record<string, unknown>>();
+  if (existing) return { duplicate: true, alertImport: rowToAlertImport(existing), run: null };
+
+  const inputs = extractJobsFromAlert(body, provider);
+  if (!inputs.length) throw new Error("No job links were recognized. Paste the complete alert email or provide structured jobs.");
+  const search = await env.DB.prepare(
+    "SELECT min_score FROM discovery_searches WHERE user_id = ? AND active = 1 ORDER BY updated_at DESC LIMIT 1",
+  ).bind(user.id).first<Record<string, unknown>>();
+  const minScore = Math.max(65, Math.min(95, Number(search?.min_score ?? 75)));
+  const profile = await profileForUser(env, user);
+  const rows: Array<Record<string, unknown>> = [];
+  let duplicates = 0;
+  for (const input of inputs) {
+    const scored = scoreJob(profile, input);
+    const saved = await saveScoredJob(env, user.id, scored, null, new Date().toISOString());
+    if (saved.duplicate) duplicates += 1;
+    const row = await env.DB.prepare("SELECT * FROM job_matches WHERE id = ? AND user_id = ?").bind(saved.id, user.id).first<Record<string, unknown>>();
+    if (row) rows.push(row);
+  }
+  rows.sort((left, right) => Number(right.match_score) - Number(left.match_score));
+  const qualified = rows.filter((row) => Number(row.match_score) >= minScore && row.status !== "SKIPPED");
+  const runId = crypto.randomUUID();
+  const completedAt = new Date().toISOString();
+  const autoStaged = await autoStageJobs(rows, env, user, minScore);
+  const alertsCreated = await createJobAlerts(env, user.id, runId, qualified, minScore, completedAt);
+  const imported = Math.max(0, rows.length - duplicates);
+  const providerReport = [{ provider: `${provider} alerts`, discovered: inputs.length, relevant: rows.length, imported, duplicates }];
+  const report = {
+    provider, subject, topOpportunities: rows.slice(0, 10).map(rowToJob),
+    highestPriority: selectHighestPriority(qualified, 3).map(rowToJob), autoStaged, alertsCreated,
+  };
+  const importId = crypto.randomUUID();
+  await env.DB.batch([
+    env.DB.prepare(
+      `INSERT INTO discovery_runs
+       (id, user_id, search_id, mode, status, providers_json, discovered, imported,
+        duplicates, qualified, report_json, started_at, completed_at)
+       VALUES (?, ?, NULL, 'PORTAL_ALERT', 'COMPLETED', ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(runId, user.id, JSON.stringify(providerReport), inputs.length, imported, duplicates, qualified.length, JSON.stringify(report), startedAt, completedAt),
+    env.DB.prepare(
+      `INSERT INTO alert_imports
+       (id, user_id, provider, message_key, subject, status, jobs_found, imported, duplicates, created_at)
+       VALUES (?, ?, ?, ?, ?, 'COMPLETED', ?, ?, ?, ?)`,
+    ).bind(importId, user.id, provider, messageKey, subject, inputs.length, imported, duplicates, completedAt),
+  ]);
+  return {
+    duplicate: false,
+    alertImport: rowToAlertImport({ id: importId, provider, subject, status: "COMPLETED", jobs_found: inputs.length, imported, duplicates, created_at: completedAt }),
+    run: rowToDiscoveryRun({ id: runId, user_id: user.id, search_id: null, mode: "PORTAL_ALERT", status: "COMPLETED", providers_json: JSON.stringify(providerReport), discovered: inputs.length, imported, duplicates, qualified: qualified.length, report_json: JSON.stringify(report), started_at: startedAt, completed_at: completedAt }),
+  };
+}
+
 async function importPortalCapture(
   body: Record<string, unknown>,
   env: Env,
@@ -1700,7 +2209,7 @@ function buildBrowserPacket(profile: CandidateProfile, job: Record<string, unkno
       first_name: names[0] ?? "",
       last_name: names.slice(1).join(" "),
       email: profile.email,
-      current_company: "SaaS Labs / JustCall",
+      current_company: asString(parseJson<Record<string, unknown>>(packet.answers_json, {}).current_company),
       current_title: profile.title,
     },
     answers: parseJson(packet.answers_json, {}),
@@ -1720,11 +2229,13 @@ async function prepareApplication(
   user: { id: string; email: string; name: string },
   now: string,
 ) {
+  const activeEvidence = await requireActiveEvidence(env, user.id);
   const jobId = asString(body.jobId);
   const job = await env.DB.prepare(
     "SELECT * FROM job_matches WHERE id = ? AND user_id = ?",
   ).bind(jobId, user.id).first<Record<string, unknown>>();
   if (!job) throw new Error("That job is no longer available in your workspace.");
+  await assertCurrentEvidence(env, user.id, job.profile_version_id);
   if (Number(job.match_score) < 70 || job.status === "SKIPPED") throw new Error("Only jobs scoring 70 or higher can enter the application queue.");
   const scored = parseJson<ScoredJob>(job.score_json, {} as ScoredJob);
   const questions = Array.isArray(body.requiredQuestions) ? body.requiredQuestions.map((item) => asString(item)).filter(Boolean) : [];
@@ -1742,7 +2253,6 @@ async function prepareApplication(
   const answers = {
     full_name: profile.name,
     email: profile.email,
-    current_company: "SaaS Labs / JustCall",
     current_title: profile.title,
     ...vault.values,
   };
@@ -1755,15 +2265,17 @@ async function prepareApplication(
   const status = blockers.length ? "NEEDS_INPUT" : "READY_FOR_REVIEW";
   await env.DB.prepare(
     `INSERT INTO application_packets
-     (id, user_id, job_id, status, answers_json, blockers_json, resume_strategy_json, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+     (id, user_id, job_id, profile_version_id, resume_id, status, answers_json, blockers_json, resume_strategy_json, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(user_id, job_id) DO UPDATE SET
+       profile_version_id = excluded.profile_version_id,
+       resume_id = excluded.resume_id,
        status = excluded.status,
        answers_json = excluded.answers_json,
        blockers_json = excluded.blockers_json,
        resume_strategy_json = excluded.resume_strategy_json,
        updated_at = excluded.updated_at`,
-  ).bind(packetId, user.id, jobId, status, JSON.stringify(answers), JSON.stringify(blockers), JSON.stringify(resumeStrategy), now, now).run();
+  ).bind(packetId, user.id, jobId, activeEvidence.profileVersionId, activeEvidence.resumeId || null, status, JSON.stringify(answers), JSON.stringify(blockers), JSON.stringify(resumeStrategy), now, now).run();
   const saved = await env.DB.prepare(
     "SELECT * FROM application_packets WHERE user_id = ? AND job_id = ?",
   ).bind(user.id, jobId).first<Record<string, unknown>>();
@@ -1771,11 +2283,13 @@ async function prepareApplication(
   const kitId = crypto.randomUUID();
   await env.DB.prepare(
     `INSERT INTO application_kits
-     (id, user_id, job_id, packet_id, summary, why_answer, resume_changes_json,
-      evidence_json, form_answers_json, status, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     (id, user_id, job_id, packet_id, profile_version_id, resume_id, summary, why_answer, resume_changes_json,
+       evidence_json, form_answers_json, status, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(user_id, job_id) DO UPDATE SET
        packet_id = excluded.packet_id,
+       profile_version_id = excluded.profile_version_id,
+       resume_id = excluded.resume_id,
        summary = excluded.summary,
        why_answer = excluded.why_answer,
        resume_changes_json = excluded.resume_changes_json,
@@ -1784,7 +2298,7 @@ async function prepareApplication(
        status = excluded.status,
        updated_at = excluded.updated_at`,
   ).bind(
-    kitId, user.id, jobId, saved?.id, kit.summary, kit.whyAnswer,
+    kitId, user.id, jobId, saved?.id, activeEvidence.profileVersionId, activeEvidence.resumeId || null, kit.summary, kit.whyAnswer,
     JSON.stringify(kit.resumeChanges), JSON.stringify(kit.evidence),
     JSON.stringify(kit.formAnswers), kit.status, now, now,
   ).run();
@@ -1905,40 +2419,40 @@ async function queueExecutionForJob(
   settings: ReturnType<typeof rowToExecutionSettings>,
   now: string,
 ) {
+  const active = await requireActiveEvidence(env, user.id);
+  await assertCurrentEvidence(env, user.id, job.profile_version_id);
   const existing = await env.DB.prepare(
     "SELECT * FROM application_executions WHERE user_id = ? AND job_id = ?",
   ).bind(user.id, job.id).first<Record<string, unknown>>();
   if (existing?.status === "SUBMITTED") return { execution: rowToExecution({ ...existing, company: job.company, role: job.role, location: job.location, match_score: job.match_score }), created: false };
 
-  const prepared = await prepareApplication({ jobId: job.id }, env, user, now) as Record<string, unknown>;
-  const packetId = asString(prepared.id);
-  const blockers = Array.isArray(prepared.blockers) ? prepared.blockers : [];
-  if (!blockers.length) {
-    await env.DB.batch([
-      env.DB.prepare("UPDATE application_packets SET status = 'APPROVED_FOR_FILL', updated_at = ? WHERE id = ? AND user_id = ?").bind(now, packetId, user.id),
-      env.DB.prepare("UPDATE application_kits SET status = 'APPROVED_FOR_FILL', updated_at = ? WHERE packet_id = ? AND user_id = ?").bind(now, packetId, user.id),
-      env.DB.prepare("INSERT INTO application_events (id, packet_id, user_id, event_type, detail_json, created_at) VALUES (?, ?, ?, 'AUTO_APPROVED_BY_POLICY', '{}', ?)").bind(crypto.randomUUID(), packetId, user.id, now),
-    ]);
-  }
+  const packet = await env.DB.prepare(
+    "SELECT * FROM application_packets WHERE user_id = ? AND job_id = ? AND profile_version_id = ?",
+  ).bind(user.id, job.id, active.profileVersionId).first<Record<string, unknown>>();
+  if (!packet || packet.status !== "APPROVED_FOR_FILL") throw new Error("Review and approve this application packet before queueing browser fill.");
+  const packetId = asString(packet.id);
+  const blockers = parseJson<unknown[]>(packet.blockers_json, []);
 
   const document = await env.DB.prepare(
     `SELECT * FROM tailored_documents
-     WHERE user_id = ? AND job_id = ? AND status = 'APPROVED'
+     WHERE user_id = ? AND job_id = ? AND profile_version_id = ? AND status = 'APPROVED'
      ORDER BY version DESC LIMIT 1`,
-  ).bind(user.id, job.id).first<Record<string, unknown>>();
+  ).bind(user.id, job.id, active.profileVersionId).first<Record<string, unknown>>();
   const capability = executionCapability(asString(job.application_url), asString(job.platform));
   const mode = effectiveExecutionMode(settings.mode as ExecutionMode, capability);
   const status = blockers.length ? "NEEDS_INPUT" : settings.requireTailoredResume && !document ? "NEEDS_DOCUMENT" : "QUEUED";
   const id = asString(existing?.id, crypto.randomUUID());
   await env.DB.prepare(
     `INSERT INTO application_executions
-     (id, user_id, job_id, packet_id, document_id, device_id, platform, mode, status,
-      attempt_count, fields_filled, unknown_required_json, last_error, application_url,
-      created_at, updated_at, claimed_at, completed_at, submitted_at)
-     VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, 0, 0, ?, NULL, ?, ?, ?, NULL, NULL, NULL)
+     (id, user_id, job_id, packet_id, document_id, profile_version_id, resume_id, device_id, platform, mode, status,
+       attempt_count, fields_filled, unknown_required_json, last_error, application_url,
+       created_at, updated_at, claimed_at, completed_at, submitted_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, 0, 0, ?, NULL, ?, ?, ?, NULL, NULL, NULL)
      ON CONFLICT(user_id, job_id) DO UPDATE SET
        packet_id = excluded.packet_id,
        document_id = excluded.document_id,
+       profile_version_id = excluded.profile_version_id,
+       resume_id = excluded.resume_id,
        platform = excluded.platform,
        mode = excluded.mode,
        status = CASE WHEN application_executions.status = 'SUBMITTED' THEN 'SUBMITTED' ELSE excluded.status END,
@@ -1949,7 +2463,7 @@ async function queueExecutionForJob(
        claimed_at = NULL,
        completed_at = NULL`,
   ).bind(
-    id, user.id, job.id, packetId, document?.id ?? null, capability.portal, mode, status,
+    id, user.id, job.id, packetId, document?.id ?? null, active.profileVersionId, active.resumeId || null, capability.portal, mode, status,
     JSON.stringify(blockers.map((blocker) => typeof blocker === "object" && blocker ? (blocker as Record<string, unknown>).question : String(blocker))),
     job.application_url, now, now,
   ).run();
@@ -1967,19 +2481,24 @@ async function queueQualifiedExecutions(
   user: { id: string; email: string; name: string },
   now: string,
 ) {
+  const active = await requireActiveEvidence(env, user.id);
   const settingsRow = await env.DB.prepare("SELECT * FROM execution_settings WHERE user_id = ?").bind(user.id).first<Record<string, unknown>>();
   const settings = rowToExecutionSettings(settingsRow);
-  if (!settings.enabled) throw new Error("Enable Phase 7 execution before queueing qualified jobs.");
+  if (!settings.enabled) throw new Error("Enable guarded browser fill before queueing qualified jobs.");
   const startOfDay = `${now.slice(0, 10)}T00:00:00.000Z`;
   const countRow = await env.DB.prepare(
-    "SELECT COUNT(*) AS count FROM application_executions WHERE user_id = ? AND created_at >= ?",
-  ).bind(user.id, startOfDay).first<Record<string, unknown>>();
+    "SELECT COUNT(*) AS count FROM application_executions WHERE user_id = ? AND profile_version_id = ? AND created_at >= ?",
+  ).bind(user.id, active.profileVersionId, startOfDay).first<Record<string, unknown>>();
   const remaining = Math.max(0, settings.dailyLimit - Number(countRow?.count ?? 0));
   if (!remaining) return { queued: [], dailyLimitReached: true, remaining: 0 };
   const jobs = await env.DB.prepare(
     `SELECT j.* FROM job_matches j
+     JOIN application_packets p ON p.user_id = j.user_id AND p.job_id = j.id
      LEFT JOIN application_executions e ON e.user_id = j.user_id AND e.job_id = j.id
+     JOIN career_profiles cp ON cp.user_id = j.user_id
      WHERE j.user_id = ? AND j.match_score >= ? AND j.status != 'SKIPPED'
+       AND j.profile_version_id = cp.active_profile_version_id
+       AND p.profile_version_id = cp.active_profile_version_id AND p.status = 'APPROVED_FOR_FILL'
        AND (e.id IS NULL OR e.status IN ('FAILED', 'NEEDS_INPUT', 'NEEDS_DOCUMENT', 'READY_TO_SUBMIT'))
      ORDER BY j.match_score DESC, j.updated_at DESC LIMIT ?`,
   ).bind(user.id, settings.minScore, remaining).all<Record<string, unknown>>();
@@ -1993,6 +2512,7 @@ async function buildExecutionPacket(
   user: { id: string; email: string; name: string },
   row: Record<string, unknown>,
 ) {
+  await assertCurrentEvidence(env, user.id, row.profile_version_id);
   const profile = await profileForUser(env, user);
   const vault = await answersForUser(env, user.id);
   const packet = {
@@ -2013,7 +2533,7 @@ async function buildExecutionPacket(
       fillSupportedFields: true,
       stopOnUnknownRequiredField: true,
       neverBypassCaptcha: true,
-      allowAutoSubmit: row.execution_mode === "AUTO_SUBMIT",
+      allowAutoSubmit: false,
       requireSubmissionConfirmation: true,
     },
   };
@@ -2023,6 +2543,18 @@ async function handleRoleSignalApi(request: Request, env: Env, url: URL, ctx: Ex
   try {
     await ensureSchema(env);
     const now = new Date().toISOString();
+
+    if (url.pathname === "/api/rolesignal/inbound-email" && request.method === "POST") {
+      if (!env.INBOUND_EMAIL_SECRET) return json({ error: "Inbound job alerts are not configured." }, 404);
+      if (request.headers.get("authorization") !== `Bearer ${env.INBOUND_EMAIL_SECRET}`) return json({ error: "Invalid inbound email credential." }, 401);
+      const body = await request.json() as Record<string, unknown>;
+      const userId = asString(body.userId).slice(0, 180);
+      if (!userId) return json({ error: "An authenticated RoleSignal userId is required." }, 400);
+      const account = await env.DB.prepare("SELECT * FROM users WHERE user_id = ?").bind(userId).first<Record<string, unknown>>();
+      if (!account) return json({ error: "The RoleSignal account was not found." }, 404);
+      const user = { id: userId, email: asString(account.email), name: asString(account.display_name, "RoleSignal user") };
+      return json(await importPortalAlert(body, env, user, now), 201);
+    }
 
     if (url.pathname.startsWith("/api/rolesignal/companion/") && request.method === "OPTIONS") {
       return new Response(null, { status: 204, headers: companionCors() });
@@ -2045,8 +2577,8 @@ async function handleRoleSignalApi(request: Request, env: Env, url: URL, ctx: Ex
           "UPDATE application_executions SET status = 'QUEUED', device_id = NULL, claimed_at = NULL, updated_at = ? WHERE user_id = ? AND status = 'CLAIMED' AND claimed_at < ?",
         ).bind(now, user.id, staleBefore).run();
         const candidate = await env.DB.prepare(
-          `SELECT e.id FROM application_executions e
-           WHERE e.user_id = ? AND e.status = 'QUEUED'
+          `SELECT e.id FROM application_executions e JOIN career_profiles cp ON cp.user_id = e.user_id
+           WHERE e.user_id = ? AND e.status = 'QUEUED' AND e.profile_version_id = cp.active_profile_version_id
            ORDER BY e.created_at ASC LIMIT 1`,
         ).bind(user.id).first<Record<string, unknown>>();
         if (!candidate) return companionJson({ execution: null, message: "No approved applications are waiting." });
@@ -2142,14 +2674,18 @@ async function handleRoleSignalApi(request: Request, env: Env, url: URL, ctx: Ex
 
     if (url.pathname === "/api/rolesignal/workspace" && request.method === "GET") {
       ctx.waitUntil(executeDueAutomations(env, now, user.id));
-      const [resumes, preferences, profile, matches, sources, packets, vault, runs, discoverySearches, discoveryRuns, automation, alerts, studioDocuments, executionSettings, devices, executions] = await Promise.all([
+      const activeEvidence = await activeEvidenceForUser(env, user.id);
+      const activeProfileVersionId = activeEvidence?.profileVersionId ?? "__no_active_profile__";
+      const activeSince = activeEvidence?.activatedAt || "9999-12-31T23:59:59.999Z";
+      const pendingProfile = await pendingProfileForUser(env, user.id);
+      const [resumes, preferences, profile, matches, sources, packets, vault, runs, discoverySearches, discoveryRuns, automation, alerts, alertImports, studioDocuments, executionSettings, devices, executions, healthRows] = await Promise.all([
         env.DB.prepare(
           `SELECT id, filename, content_type, size_bytes, status, created_at
            FROM resumes WHERE user_id = ? ORDER BY created_at DESC LIMIT 10`,
         ).bind(user.id).all(),
         env.DB.prepare("SELECT * FROM preferences WHERE user_id = ?").bind(user.id).first(),
         profileForUser(env, user),
-        env.DB.prepare("SELECT * FROM job_matches WHERE user_id = ? ORDER BY match_score DESC, updated_at DESC LIMIT 200").bind(user.id).all(),
+        env.DB.prepare("SELECT * FROM job_matches WHERE user_id = ? AND profile_version_id = ? AND status != 'STALE' ORDER BY match_score DESC, updated_at DESC LIMIT 200").bind(user.id, activeProfileVersionId).all(),
         env.DB.prepare("SELECT * FROM job_sources WHERE user_id = ? AND active = 1 ORDER BY created_at DESC").bind(user.id).all(),
         env.DB.prepare(
           `SELECT p.*, j.company, j.role, j.application_url, j.match_score,
@@ -2160,36 +2696,45 @@ async function handleRoleSignalApi(request: Request, env: Env, url: URL, ctx: Ex
                   k.status AS kit_status
            FROM application_packets p JOIN job_matches j ON j.id = p.job_id
            LEFT JOIN application_kits k ON k.user_id = p.user_id AND k.job_id = p.job_id
-           WHERE p.user_id = ? ORDER BY p.updated_at DESC`,
-        ).bind(user.id).all(),
+            WHERE p.user_id = ? AND p.profile_version_id = ? AND p.status != 'STALE' ORDER BY p.updated_at DESC`,
+        ).bind(user.id, activeProfileVersionId).all(),
         answersForUser(env, user.id),
         env.DB.prepare(
-          "SELECT * FROM search_runs WHERE user_id = ? ORDER BY completed_at DESC, started_at DESC LIMIT 20",
-        ).bind(user.id).all(),
+          "SELECT * FROM search_runs WHERE user_id = ? AND started_at >= ? ORDER BY completed_at DESC, started_at DESC LIMIT 20",
+        ).bind(user.id, activeSince).all(),
         env.DB.prepare(
           "SELECT * FROM discovery_searches WHERE user_id = ? AND active = 1 ORDER BY updated_at DESC LIMIT 20",
         ).bind(user.id).all(),
         env.DB.prepare(
-          "SELECT * FROM discovery_runs WHERE user_id = ? ORDER BY completed_at DESC, started_at DESC LIMIT 30",
-        ).bind(user.id).all(),
+          "SELECT * FROM discovery_runs WHERE user_id = ? AND started_at >= ? ORDER BY completed_at DESC, started_at DESC LIMIT 30",
+        ).bind(user.id, activeSince).all(),
         env.DB.prepare("SELECT * FROM automation_settings WHERE user_id = ?").bind(user.id).first<Record<string, unknown>>(),
         env.DB.prepare(
-          "SELECT * FROM job_alerts WHERE user_id = ? ORDER BY created_at DESC LIMIT 50",
-        ).bind(user.id).all(),
+          `SELECT a.* FROM job_alerts a JOIN job_matches j ON j.id = a.job_id
+           WHERE a.user_id = ? AND j.profile_version_id = ? AND j.status != 'STALE' ORDER BY a.created_at DESC LIMIT 50`,
+        ).bind(user.id, activeProfileVersionId).all(),
+        env.DB.prepare(
+          "SELECT * FROM alert_imports WHERE user_id = ? AND created_at >= ? ORDER BY created_at DESC LIMIT 20",
+        ).bind(user.id, activeSince).all(),
         env.DB.prepare(
           `SELECT d.*, j.company, j.role, j.location, j.match_score
            FROM tailored_documents d JOIN job_matches j ON j.id = d.job_id
-           WHERE d.user_id = ? ORDER BY d.updated_at DESC LIMIT 100`,
-        ).bind(user.id).all(),
+            WHERE d.user_id = ? AND d.profile_version_id = ? AND d.status != 'STALE' ORDER BY d.updated_at DESC LIMIT 100`,
+        ).bind(user.id, activeProfileVersionId).all(),
         env.DB.prepare("SELECT * FROM execution_settings WHERE user_id = ?").bind(user.id).first<Record<string, unknown>>(),
         env.DB.prepare("SELECT * FROM companion_devices WHERE user_id = ? ORDER BY created_at DESC LIMIT 10").bind(user.id).all<Record<string, unknown>>(),
-        executionRows(env, user.id),
+        executionRows(env, user.id, activeProfileVersionId),
+        env.DB.prepare("SELECT * FROM source_health WHERE user_id = ? ORDER BY provider").bind(user.id).all<Record<string, unknown>>(),
       ]);
       return json({
         user,
         resumes: resumes.results,
         preferences,
         profile,
+        profileStatus: activeEvidence ? "VERIFIED" : pendingProfile ? "PENDING_REVIEW" : "EMPTY",
+        activeProfileVersionId: activeEvidence?.profileVersionId ?? null,
+        activeResumeId: activeEvidence?.resumeId ?? null,
+        pendingProfileVersion: pendingProfile,
         jobs: (matches.results as Record<string, unknown>[]).map(rowToJob),
         sources: sources.results,
         packets: (packets.results as Record<string, unknown>[]).map(rowToPacket),
@@ -2197,8 +2742,10 @@ async function handleRoleSignalApi(request: Request, env: Env, url: URL, ctx: Ex
         searchRuns: (runs.results as Record<string, unknown>[]).map(rowToRun),
         discoverySearches: (discoverySearches.results as Record<string, unknown>[]).map(rowToDiscoverySearch),
         discoveryRuns: (discoveryRuns.results as Record<string, unknown>[]).map(rowToDiscoveryRun),
+        discoverySources: discoverySources(env, sources.results.length, healthRows.results),
         automation: rowToAutomation(automation),
         alerts: (alerts.results as Record<string, unknown>[]).map(rowToAlert),
+        alertImports: (alertImports.results as Record<string, unknown>[]).map(rowToAlertImport),
         studioDocuments: (studioDocuments.results as Record<string, unknown>[]).map(rowToStudioDocument),
         executionSettings: rowToExecutionSettings(executionSettings),
         companionDevices: devices.results.map(rowToCompanionDevice),
@@ -2223,8 +2770,11 @@ async function handleRoleSignalApi(request: Request, env: Env, url: URL, ctx: Ex
       const safeName = candidateFile.name.replace(/[^a-zA-Z0-9._-]/g, "-");
       const objectKey = `${user.id}/${id}-${safeName}`;
       const resumeText = asString(form.get("resumeText")) || (candidateFile.type === "text/plain" ? new TextDecoder().decode(bytes) : "");
-      const profile = resumeText ? profileFromResumeText(resumeText.slice(0, 200_000), user.name, user.email) : null;
-      const status = profile ? "analyzed" : "needs_text_extraction";
+      const profile = resumeText ? profileFromResumeText(resumeText.slice(0, 200_000), "", user.email) : null;
+      const status = profile ? "awaiting_review" : "needs_text_extraction";
+      const versionRow = await env.DB.prepare("SELECT COALESCE(MAX(version), 0) + 1 AS version FROM career_profile_versions WHERE user_id = ?").bind(user.id).first<Record<string, unknown>>();
+      const version = Number(versionRow?.version ?? 1);
+      const profileVersionId = crypto.randomUUID();
       await env.RESUMES.put(objectKey, bytes, {
         httpMetadata: { contentType: candidateFile.type },
         customMetadata: { owner: user.id, originalName: candidateFile.name },
@@ -2232,38 +2782,73 @@ async function handleRoleSignalApi(request: Request, env: Env, url: URL, ctx: Ex
       await env.DB.batch([
         env.DB.prepare(
           `INSERT INTO resumes
-           (id, user_id, object_key, filename, content_type, size_bytes, status, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        ).bind(id, user.id, objectKey, candidateFile.name, candidateFile.type, candidateFile.size, status, now),
+           (id, user_id, object_key, filename, content_type, size_bytes, status, version, profile_version_id, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).bind(id, user.id, objectKey, candidateFile.name, candidateFile.type, candidateFile.size, status, version, profileVersionId, now),
         env.DB.prepare(
-          `INSERT INTO career_profiles (user_id, resume_id, raw_text, extracted_json, status, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?)
-           ON CONFLICT(user_id) DO UPDATE SET
-             resume_id = excluded.resume_id,
-             raw_text = excluded.raw_text,
-             extracted_json = excluded.extracted_json,
-             status = excluded.status,
-             updated_at = excluded.updated_at`,
-        ).bind(user.id, id, resumeText, JSON.stringify(profile ?? { ...ROHIT_PROFILE, name: user.name, email: user.email }), status, now),
+          `INSERT INTO career_profile_versions
+           (id, user_id, resume_id, version, status, raw_text, extracted_json, created_at, activated_at)
+           VALUES (?, ?, ?, ?, 'PENDING_REVIEW', ?, ?, ?, NULL)`,
+        ).bind(profileVersionId, user.id, id, version, resumeText, JSON.stringify(profile ?? EMPTY_PROFILE), now),
       ]);
-      return json({ id, filename: candidateFile.name, size: candidateFile.size, status, profile }, 201);
+      return json({ id, filename: candidateFile.name, size: candidateFile.size, status, profileVersion: { id: profileVersionId, resumeId: id, version, status: "PENDING_REVIEW", profile, createdAt: now } }, 201);
     }
 
     if (url.pathname === "/api/rolesignal/profile/analyze" && request.method === "POST") {
       const body = await request.json() as Record<string, unknown>;
       const resumeText = asString(body.resumeText).slice(0, 200_000);
       if (resumeText.length < 80) return json({ error: "Paste enough resume text to analyze accurately." }, 400);
-      const profile = profileFromResumeText(resumeText, user.name, user.email);
+      const profile = profileFromResumeText(resumeText, "", user.email);
+      const versionRow = await env.DB.prepare("SELECT COALESCE(MAX(version), 0) + 1 AS version FROM career_profile_versions WHERE user_id = ?").bind(user.id).first<Record<string, unknown>>();
+      const version = Number(versionRow?.version ?? 1);
+      const profileVersionId = crypto.randomUUID();
       await env.DB.prepare(
-        `INSERT INTO career_profiles (user_id, resume_id, raw_text, extracted_json, status, updated_at)
-         VALUES (?, NULL, ?, ?, 'analyzed', ?)
-         ON CONFLICT(user_id) DO UPDATE SET
-           raw_text = excluded.raw_text,
-           extracted_json = excluded.extracted_json,
-           status = excluded.status,
-           updated_at = excluded.updated_at`,
-      ).bind(user.id, resumeText, JSON.stringify(profile), now).run();
-      return json({ profile: await profileForUser(env, user), status: "analyzed" });
+        `INSERT INTO career_profile_versions
+         (id, user_id, resume_id, version, status, raw_text, extracted_json, created_at, activated_at)
+         VALUES (?, ?, NULL, ?, 'PENDING_REVIEW', ?, ?, ?, NULL)`,
+      ).bind(profileVersionId, user.id, version, resumeText, JSON.stringify(profile), now).run();
+      return json({ profileVersion: { id: profileVersionId, resumeId: null, version, status: "PENDING_REVIEW", profile, createdAt: now } }, 201);
+    }
+
+    if (url.pathname === "/api/rolesignal/profile/confirm" && request.method === "POST") {
+      const body = await request.json() as Record<string, unknown>;
+      const profileVersionId = asString(body.profileVersionId);
+      const draft = await env.DB.prepare(
+        "SELECT * FROM career_profile_versions WHERE id = ? AND user_id = ? AND status = 'PENDING_REVIEW'",
+      ).bind(profileVersionId, user.id).first<Record<string, unknown>>();
+      if (!draft) return json({ error: "The pending profile was not found or has already been reviewed." }, 404);
+      const supplied = body.profile && typeof body.profile === "object" ? body.profile as Record<string, unknown> : parseJson<Record<string, unknown>>(draft.extracted_json, {});
+      const profile: CandidateProfile = {
+        name: asString(supplied.name).slice(0, 120),
+        email: asString(supplied.email, user.email).slice(0, 200),
+        title: asString(supplied.title, "Software Engineer").slice(0, 160),
+        experienceYears: Math.max(0, Math.min(50, Number(supplied.experienceYears ?? 0))),
+        skills: Array.isArray(supplied.skills) ? supplied.skills.map((item) => asString(item).slice(0, 100)).filter(Boolean).slice(0, 80) : [],
+        domains: Array.isArray(supplied.domains) ? supplied.domains.map((item) => asString(item).slice(0, 160)).filter(Boolean).slice(0, 30) : [],
+        evidence: Array.isArray(supplied.evidence) ? supplied.evidence.map((item) => asString(item).slice(0, 500)).filter(Boolean).slice(0, 30) : [],
+        source: "resume",
+      };
+      if (!profile.name) return json({ error: "Confirm the candidate name before activating this profile." }, 400);
+      if (!profile.skills.length && !profile.evidence.length) return json({ error: "Confirm at least one skill or evidence statement before activating this profile." }, 400);
+      const resumeId = asString(draft.resume_id);
+      await env.DB.batch([
+        env.DB.prepare("UPDATE users SET display_name = ? WHERE user_id = ?").bind(profile.name, user.id),
+        env.DB.prepare("UPDATE career_profile_versions SET status = 'SUPERSEDED' WHERE user_id = ? AND status = 'ACTIVE'").bind(user.id),
+        env.DB.prepare("UPDATE career_profile_versions SET status = 'ACTIVE', extracted_json = ?, activated_at = ? WHERE id = ? AND user_id = ?").bind(JSON.stringify(profile), now, profileVersionId, user.id),
+        env.DB.prepare(
+          `INSERT INTO career_profiles (user_id, resume_id, active_profile_version_id, raw_text, extracted_json, status, updated_at)
+           VALUES (?, ?, ?, ?, ?, 'VERIFIED', ?)
+           ON CONFLICT(user_id) DO UPDATE SET resume_id = excluded.resume_id, active_profile_version_id = excluded.active_profile_version_id,
+             raw_text = excluded.raw_text, extracted_json = excluded.extracted_json, status = excluded.status, updated_at = excluded.updated_at`,
+        ).bind(user.id, resumeId || null, profileVersionId, draft.raw_text, JSON.stringify(profile), now),
+        env.DB.prepare("UPDATE resumes SET status = CASE WHEN id = ? THEN 'active' ELSE 'superseded' END WHERE user_id = ?").bind(resumeId || "__none__", user.id),
+        env.DB.prepare("UPDATE job_matches SET status = 'STALE' WHERE user_id = ? AND (profile_version_id IS NULL OR profile_version_id != ?)").bind(user.id, profileVersionId),
+        env.DB.prepare("UPDATE application_packets SET status = 'STALE' WHERE user_id = ? AND (profile_version_id IS NULL OR profile_version_id != ?)").bind(user.id, profileVersionId),
+        env.DB.prepare("UPDATE application_kits SET status = 'STALE' WHERE user_id = ? AND (profile_version_id IS NULL OR profile_version_id != ?)").bind(user.id, profileVersionId),
+        env.DB.prepare("UPDATE tailored_documents SET status = 'STALE' WHERE user_id = ? AND status != 'SUPERSEDED' AND (profile_version_id IS NULL OR profile_version_id != ?)").bind(user.id, profileVersionId),
+        env.DB.prepare("UPDATE application_executions SET status = 'STALE' WHERE user_id = ? AND status != 'SUBMITTED' AND (profile_version_id IS NULL OR profile_version_id != ?)").bind(user.id, profileVersionId),
+      ]);
+      return json({ confirmed: true, profile, activeProfileVersionId: profileVersionId, resumeId: resumeId || null });
     }
 
     if (url.pathname === "/api/rolesignal/preferences" && request.method === "POST") {
@@ -2342,7 +2927,7 @@ async function handleRoleSignalApi(request: Request, env: Env, url: URL, ctx: Ex
       const jobId = asString(body.jobId);
       const settingsRow = await env.DB.prepare("SELECT * FROM execution_settings WHERE user_id = ?").bind(user.id).first<Record<string, unknown>>();
       const settings = rowToExecutionSettings(settingsRow);
-      if (!settings.enabled) return json({ error: "Enable Phase 7 execution before adding an application." }, 409);
+      if (!settings.enabled) return json({ error: "Enable guarded browser fill before adding an application." }, 409);
       const job = await env.DB.prepare("SELECT * FROM job_matches WHERE id = ? AND user_id = ?").bind(jobId, user.id).first<Record<string, unknown>>();
       if (!job) return json({ error: "Job not found." }, 404);
       return json(await queueExecutionForJob(env, user, job, settings, now), 201);
@@ -2462,6 +3047,11 @@ async function handleRoleSignalApi(request: Request, env: Env, url: URL, ctx: Ex
       return json({ run: await runDiscovery(body, env, user, now) }, 201);
     }
 
+    if (url.pathname === "/api/rolesignal/discovery/alerts" && request.method === "POST") {
+      const body = await request.json() as Record<string, unknown>;
+      return json(await importPortalAlert(body, env, user, now), 201);
+    }
+
     if (url.pathname === "/api/rolesignal/discovery/capture" && request.method === "POST") {
       const body = await request.json() as Record<string, unknown>;
       return json({ run: await importPortalCapture(body, env, user, now) }, 201);
@@ -2498,6 +3088,7 @@ async function handleRoleSignalApi(request: Request, env: Env, url: URL, ctx: Ex
       const provided = typeof body.answers === "object" && body.answers ? body.answers as Record<string, unknown> : {};
       const packet = await env.DB.prepare("SELECT * FROM application_packets WHERE id = ? AND user_id = ?").bind(packetId, user.id).first<Record<string, unknown>>();
       if (!packet) return json({ error: "Application packet not found." }, 404);
+      await assertCurrentEvidence(env, user.id, packet.profile_version_id);
       const blockers = parseJson<Array<{ id: string; question: string; status: string }>>(packet.blockers_json, []);
       const answers = { ...parseJson<Record<string, unknown>>(packet.answers_json, {}), ...provided };
       const unresolved = blockers.filter((blocker) => !asString(provided[blocker.id]));
@@ -2516,6 +3107,7 @@ async function handleRoleSignalApi(request: Request, env: Env, url: URL, ctx: Ex
       const packetId = asString(body.packetId);
       const packet = await env.DB.prepare("SELECT * FROM application_packets WHERE id = ? AND user_id = ?").bind(packetId, user.id).first<Record<string, unknown>>();
       if (!packet) return json({ error: "Application packet not found." }, 404);
+      await assertCurrentEvidence(env, user.id, packet.profile_version_id);
       const blockers = parseJson<unknown[]>(packet.blockers_json, []);
       if (blockers.length) return json({ error: "Resolve every required answer before approval.", blockers }, 409);
       await env.DB.batch([
@@ -2530,6 +3122,7 @@ async function handleRoleSignalApi(request: Request, env: Env, url: URL, ctx: Ex
       const packetId = url.searchParams.get("id") ?? "";
       const packet = await env.DB.prepare("SELECT * FROM application_packets WHERE id = ? AND user_id = ?").bind(packetId, user.id).first<Record<string, unknown>>();
       if (!packet) return json({ error: "Application packet not found." }, 404);
+      await assertCurrentEvidence(env, user.id, packet.profile_version_id);
       const job = await env.DB.prepare("SELECT * FROM job_matches WHERE id = ? AND user_id = ?").bind(packet.job_id, user.id).first<Record<string, unknown>>();
       if (!job) return json({ error: "Job not found." }, 404);
       const vault = await answersForUser(env, user.id);
@@ -2548,6 +3141,7 @@ async function handleRoleSignalApi(request: Request, env: Env, url: URL, ctx: Ex
          WHERE k.packet_id = ? AND k.user_id = ?`,
       ).bind(packetId, user.id).first<Record<string, unknown>>();
       if (!kit) return json({ error: "Application kit not found." }, 404);
+      await assertCurrentEvidence(env, user.id, kit.profile_version_id);
       return json({
         kit: {
           id: kit.id,
@@ -2573,6 +3167,7 @@ async function handleRoleSignalApi(request: Request, env: Env, url: URL, ctx: Ex
         "SELECT * FROM job_matches WHERE id = ? AND user_id = ?",
       ).bind(jobId, user.id).first<Record<string, unknown>>();
       if (!jobRow) return json({ error: "Choose a live matched job before creating a tailored version." }, 404);
+      await assertCurrentEvidence(env, user.id, jobRow.profile_version_id);
       if (Number(jobRow.match_score) < 75 || jobRow.status === "SKIPPED") return json({ error: "Only qualified jobs can enter the Tailored Studio." }, 409);
       const sources = await studioSources(env, user);
       const job = studioJobFromRow(jobRow);
@@ -2586,11 +3181,11 @@ async function handleRoleSignalApi(request: Request, env: Env, url: URL, ctx: Ex
       const title = `${job.company} - ${job.role}`.slice(0, 300);
       await env.DB.prepare(
         `INSERT INTO tailored_documents
-         (id, user_id, job_id, resume_id, version, status, title, content_json, evidence_json,
-          grounding_score, docx_object_key, pdf_object_key, created_at, updated_at, approved_at)
-         VALUES (?, ?, ?, ?, ?, 'DRAFT', ?, ?, ?, ?, NULL, NULL, ?, ?, NULL)`,
+         (id, user_id, job_id, resume_id, profile_version_id, version, status, title, content_json, evidence_json,
+           grounding_score, docx_object_key, pdf_object_key, created_at, updated_at, approved_at)
+         VALUES (?, ?, ?, ?, ?, ?, 'DRAFT', ?, ?, ?, ?, NULL, NULL, ?, ?, NULL)`,
       ).bind(
-        id, user.id, jobId, sources.resumeId || null, version, title,
+        id, user.id, jobId, sources.resumeId || null, sources.profileVersionId, version, title,
         JSON.stringify(generated.content), JSON.stringify(generated.evidence), generated.groundingScore, now, now,
       ).run();
       const saved = await env.DB.prepare(
@@ -2610,6 +3205,7 @@ async function handleRoleSignalApi(request: Request, env: Env, url: URL, ctx: Ex
          WHERE d.id = ? AND d.user_id = ?`,
       ).bind(id, user.id).first<Record<string, unknown>>();
       if (!row) return json({ error: "Tailored document not found." }, 404);
+      await assertCurrentEvidence(env, user.id, row.profile_version_id);
       const content = safeStudioContent(body.content);
       if (!content.summary || !content.sections.length || !content.skills.length) return json({ error: "Keep a summary, skills, and at least one evidence section before saving." }, 400);
       const sources = await studioSources(env, user);
@@ -2638,6 +3234,7 @@ async function handleRoleSignalApi(request: Request, env: Env, url: URL, ctx: Ex
          WHERE d.id = ? AND d.user_id = ?`,
       ).bind(id, user.id).first<Record<string, unknown>>();
       if (!row) return json({ error: "Tailored document not found." }, 404);
+      await assertCurrentEvidence(env, user.id, row.profile_version_id);
       const content = safeStudioContent(parseJson(row.content_json, {}));
       const sources = await studioSources(env, user);
       const job = studioJobFromRow(row);

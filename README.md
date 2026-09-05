@@ -1,57 +1,23 @@
 # RoleSignal
 
-RoleSignal is an explainable job-matching and guarded application-execution workspace for backend engineers. It balances interview probability, application volume, and truthful evidence.
+RoleSignal is an explainable job-discovery and assisted-application workspace for job seekers in India. It ranks opportunities against resume evidence, keeps every generated claim traceable, and never silently submits an application.
 
-## Phase 7 capabilities
+## Trustworthy MVP
 
-- Converts qualified matches into a durable execution queue with a configurable 70–95% threshold and daily cap.
-- Pairs a Chrome companion using a one-time connection key whose hash is stored in D1.
-- Polls only approved applications, opens the official URL, fills verified fields, and uploads the approved tailored or primary resume.
-- Supports opt-in conservative auto-submit on Greenhouse, Lever, and Ashby single-page forms.
-- Downgrades LinkedIn, Naukri, Workday, Indeed, and unknown portals to assisted fill when their flows cannot be safely confirmed.
-- Pauses on CAPTCHA, unanswered required fields, missing resumes, unsupported submit controls, and unconfirmed submissions.
-- Tracks queued, claimed, needs-input, ready-to-submit, submitted, and failed outcomes with an auditable application event.
-- Runs the execution queue automatically after scheduled discovery when Phase 7 is enabled.
-
-## Phase 6 capabilities
-
-- Creates a versioned, role-specific ATS resume from the current verified career profile.
-- Reorders skills and impact evidence against each saved job description without inventing experience.
-- Adds an editable cover note and reusable written application answers for each role.
-- Maintains claim-level provenance and revalidates edited text against resume, profile, job, and answer-vault sources.
-- Blocks approval when an edited claim has no supporting evidence.
-- Generates approved DOCX and PDF resumes in R2 and exposes owner-checked download routes.
-- Keeps earlier approved versions downloadable while clearly marking superseded versions.
-
-- Extracts text from PDF, DOCX, and TXT resumes and stores the source file in R2.
-- Maintains a verified career profile in D1 without inventing unsupported claims.
-- Imports individual job pages or scans public Greenhouse, Lever, and Ashby boards.
-- Scores every role with a transparent 100-point backend-engineering rubric.
-- Separates language mismatch from engineering-domain mismatch.
-- Deduplicates on company, role, and location while preferring official URLs.
-- Prepares application packets, resume-ordering guidance, blockers, and an audit trail.
-- Includes a Chrome companion that fills supported fields; Phase 7 adds policy-controlled compatible submission.
-- Runs every connected source in one resilient batch and keeps a durable search report.
-- Ranks a focused top three across companies and exports the full run as Markdown.
-- Stores recurring, explicitly verified application answers in a private answer vault.
-- Generates reusable application kits with role strategy, a grounded `why this role` answer, resume changes, and supporting evidence.
-- Exports the application ledger as CSV for portfolio analysis or follow-up tracking.
-- Runs a saved discovery profile across Jobicy, Arbeitnow, and every connected company ATS board.
-- Enforces an hourly public-feed refresh window, normalizes provider data, and merges duplicate roles.
-- Launches targeted LinkedIn, Naukri, Indeed, and wider web searches from one Discovery workspace.
-- Imports visible LinkedIn, Naukri, Workday, Indeed, and company-portal job cards captured by the Chrome companion.
-- Keeps public-feed runs and authenticated portal captures in one durable discovery history.
-- Runs an hourly Cloudflare Worker pulse and executes each saved search only when its chosen cadence is due.
-- Stores automation health, next-run timing, failures, and a deduplicated Signal inbox in D1.
-- Sends opt-in browser notifications for newly qualified matches while keeping the in-app inbox authoritative.
-- Scans public Ashby job boards alongside Greenhouse and Lever, including full descriptions and compensation when published.
-- Launches searches across LinkedIn, Naukri, Indeed, Wellfound, Cutshort, Instahyre, Hirist, Foundit, Google Jobs, and YC Startups.
-- Retrieves the full official job page on demand, reads JobPosting structured data, and rescores the role.
-- Uses an explainable evidence-semantic graph to translate Kafka/queue, cloud, caching, orchestration, data-scale, reliability, and AI-agent requirements into verified transferable experience.
+- Uploads PDF, DOCX, or TXT resumes into a draft profile that must be reviewed before it becomes active.
+- Versions the active resume evidence. A newly confirmed version makes older scores, packets, documents, and queued executions stale so candidate data cannot leak between profiles.
+- Runs one ranked search across Jobicy, Arbeitnow, optional Adzuna, optional Jooble, optional Google Jobs via SerpApi, and connected Greenhouse, Lever, or Ashby company boards.
+- Reports real connector health—last attempt, response count, accepted jobs, latency, and errors—instead of displaying static “live” badges.
+- Imports LinkedIn, Naukri, Indeed, Foundit, Workday, and other portal alert emails without storing portal passwords or scraping protected pages.
+- Deduplicates imported listings and scores them using only the active, user-confirmed resume evidence.
+- Prepares grounded application packets, tailored resumes, cover notes, and reusable answers with an audit trail.
+- Queues only applications explicitly approved for filling. The Chrome companion fills recognized fields and pauses before submission.
+- Stops for CAPTCHAs, missing required answers, unsupported controls, stale evidence, and any state it cannot safely verify.
+- Keeps sample opportunities out of live counts and clearly shows an empty state when no verified jobs have been found.
 
 ## Safety model
 
-Unknown compensation, notice-period, work-authorization, legal, relocation, and demographic answers are marked `NEEDS_INPUT`. CAPTCHAs and access controls are never bypassed. The browser companion is host-locked. Automatic final submission is opt-in and limited to compatible ATS pages where every required field is satisfied and a success state can be confirmed.
+Unknown compensation, notice-period, work-authorization, legal, relocation, and demographic answers are marked `NEEDS_INPUT`. CAPTCHAs and access controls are never bypassed. The browser companion is host-locked and final submission always remains manual.
 
 ## Run locally
 
@@ -61,6 +27,8 @@ Requirements: Node.js 22.13 or newer.
 npm install
 npm run dev
 ```
+
+Copy `.env.example` to `.env.local` if you want to enable the optional Adzuna, Jooble, Google Jobs, or inbound-email connectors. Never commit real keys.
 
 Build and validate:
 
@@ -76,7 +44,7 @@ npm run db:generate
 
 ## Browser companion
 
-The extension source is in `browser-extension/`. Load it unpacked from `chrome://extensions`, or download the generated zip from the running app. Version 0.7 can capture visible jobs, pair with the Phase 7 execution queue, fill approved applications, upload resumes, and apply the configured submission guardrails.
+The extension source is in `browser-extension/`. Load it unpacked from `chrome://extensions`, or download the generated zip from the running app. Version 0.7 pairs with the guarded execution queue, fills approved applications, uploads the selected resume, and pauses before final submission. Protected portals are covered through their job-alert emails and browser-assisted capture rather than credential scraping.
 
 ## Publish to GitHub
 
@@ -89,8 +57,8 @@ Create an empty repository on GitHub, then add it as the local `origin` and push
 - D1 for profiles, job matches, preferences, verified answers, saved discovery searches, automation schedules, alerts, discovery runs, application kits, tailored document versions, execution policies, paired devices, application executions, packets, and audit events
 - R2 for source resumes and approved DOCX/PDF exports
 - Drizzle schema and checked-in SQL migrations
-- Public Greenhouse, Lever, Ashby, Jobicy, and Arbeitnow feeds for server-side discovery
+- Public Greenhouse, Lever, Ashby, Jobicy, and Arbeitnow feeds, with optional Adzuna, Jooble, and Google Jobs connectors for server-side discovery
 - Cloudflare Cron Trigger for hourly due-search processing
-- Browser-assisted capture for portals that depend on a signed-in user session
+- Portal alert ingestion for job sites that depend on a signed-in user session
 
 The OpenAI analysis path is intentionally not enabled until a server-side API key is configured. The current release uses deterministic, auditable extraction and scoring.
