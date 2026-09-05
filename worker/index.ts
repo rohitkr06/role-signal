@@ -12,6 +12,7 @@ import {
   type JobInput,
   type ScoredJob,
 } from "../lib/rolesignal";
+import { expandSearchKeywords } from "../lib/job-eligibility";
 import {
   buildResumeDocx,
   buildResumePdf,
@@ -1530,6 +1531,43 @@ type GoogleJob = {
   apply_options?: Array<{ title?: string; link?: string }>;
 };
 
+type FreehireJob = {
+  public_slug?: string;
+  external_id?: string;
+  url?: string;
+  title?: string;
+  company?: string;
+  location?: string;
+  description?: string;
+  skills?: string[];
+  work_mode?: string;
+  regions?: string[];
+  countries?: string[];
+  cities?: string[];
+  posted_at?: string | null;
+  enrichment?: {
+    seniority?: string;
+    category?: string;
+    employment_type?: string;
+    salary_min?: number;
+    salary_max?: number;
+    salary_currency?: string;
+  };
+};
+
+type RemotiveJob = {
+  id?: number | string;
+  url?: string;
+  title?: string;
+  company_name?: string;
+  category?: string;
+  job_type?: string;
+  publication_date?: string;
+  candidate_required_location?: string;
+  salary?: string;
+  description?: string;
+};
+
 type DiscoveryProviderResult = {
   provider: string;
   discovered: number;
@@ -1558,12 +1596,12 @@ function stringList(value: unknown, fallback: string[]) {
 
 function discoveryConfig(body: Record<string, unknown>): DiscoveryConfig {
   return {
-    name: asString(body.name, "Backend roles / India + Remote").slice(0, 80),
+    name: asString(body.name, "Backend roles / India + Global Remote").slice(0, 80),
     keywords: stringList(body.keywords, ["Backend Engineer", "Software Engineer", "Platform Engineer", "Node.js"]),
-    locations: stringList(body.locations, ["India", "Remote", "APAC"]),
+    locations: stringList(body.locations, ["India", "Remote", "Worldwide", "APAC"]),
     workModes: stringList(body.workModes, ["Remote", "Hybrid"]),
-    portals: stringList(body.portals, ["Jobicy", "Arbeitnow", "Connected ATS boards"]),
-    minScore: Math.max(65, Math.min(95, Number(body.minScore ?? 75))),
+    portals: stringList(body.portals, ["Freehire", "Remotive", "Jobicy", "Arbeitnow", "Connected ATS boards"]),
+    minScore: Math.max(50, Math.min(95, Number(body.minScore ?? 65))),
   };
 }
 
@@ -1578,7 +1616,7 @@ function isDiscoveryCandidate(job: JobInput, config: DiscoveryConfig) {
   const roleRelevant = targetTerms.some((term) => role.includes(term)) || /backend|back-end|platform engineer|api engineer|infrastructure engineer|distributed systems|node\.js|nodejs/.test(role);
   if (!roleRelevant) return false;
   const mode = (job.workMode || inferWorkMode(job.location, description)).toLowerCase();
-  const location = job.location.toLowerCase();
+  const location = `${job.location} ${job.eligibilityHint || ""}`.toLowerCase();
   const locationRelevant = config.locations.some((wanted) => {
     const value = wanted.toLowerCase();
     if (value === "remote") return mode === "remote" || /worldwide|anywhere/.test(location);
@@ -1628,10 +1666,14 @@ async function autoStageJobs(
     "SELECT auto_apply, daily_limit, match_threshold FROM preferences WHERE user_id = ?",
   ).bind(user.id).first<Record<string, unknown>>();
   if (Number(preferences?.auto_apply ?? 0) !== 1) return [];
-  const effectiveThreshold = Math.max(75, threshold, Number(preferences?.match_threshold ?? 75));
+  const effectiveThreshold = Math.max(70, threshold, Number(preferences?.match_threshold ?? 75));
   const limit = Math.max(1, Math.min(20, Number(preferences?.daily_limit ?? 5)));
   const staged: Array<{ packetId: string; jobId: string; status: string }> = [];
-  for (const row of rows.filter((job) => Number(job.match_score) >= effectiveThreshold && job.status !== "SKIPPED").slice(0, limit)) {
+  for (const row of rows.filter((job) => {
+    const scored = parseJson<Record<string, unknown>>(job.score_json, {});
+    const eligibility = scored.eligibility as Record<string, unknown> | undefined;
+    return Number(job.match_score) >= effectiveThreshold && job.status !== "SKIPPED" && eligibility?.decision === "ELIGIBLE";
+  }).slice(0, limit)) {
     try {
       const packet = await prepareApplication({ jobId: row.id }, env, user, new Date().toISOString());
       staged.push({ packetId: asString(packet.id), jobId: asString(row.id), status: asString(packet.status) });
@@ -1695,6 +1737,8 @@ function discoverySources(env: Env, connectedBoards: number, healthRows: Record<
     };
   };
   return [
+    automatic("freehire", "Freehire", "India + worldwide remote ATS jobs"),
+    automatic("remotive", "Remotive", "Curated worldwide remote jobs"),
     automatic("jobicy", "Jobicy", "Remote / APAC"),
     automatic("arbeitnow", "Arbeitnow", "Aggregated company jobs"),
     automatic("adzuna", "Adzuna India", "India-wide listings", Boolean(env.ADZUNA_APP_ID && env.ADZUNA_APP_KEY), "Add ADZUNA_APP_ID and ADZUNA_APP_KEY"),
@@ -1748,6 +1792,94 @@ async function fetchArbeitnowDiscovery(config: DiscoveryConfig): Promise<Discove
     description: stripHtml(asString(job.description)),
   })).filter((job) => job.applicationUrl && isDiscoveryCandidate(job, config));
   return { provider: "Arbeitnow", discovered: jobs.length, candidates };
+}
+
+function freehireSalary(job: FreehireJob) {
+  const enrichment = job.enrichment ?? {};
+  if (enrichment.salary_min == null && enrichment.salary_max == null) return "";
+  const range = [enrichment.salary_min, enrichment.salary_max].filter((value) => value != null).join("-");
+  return [enrichment.salary_currency, range].filter(Boolean).join(" ");
+}
+
+function freehireWorkMode(job: FreehireJob) {
+  const mode = asString(job.work_mode).toLowerCase();
+  if (mode === "remote") return "Remote";
+  if (mode === "hybrid") return "Hybrid";
+  if (mode === "onsite" || mode === "on-site") return "On-site";
+  return inferWorkMode(asString(job.location), asString(job.description));
+}
+
+async function fetchFreehireDiscovery(config: DiscoveryConfig): Promise<DiscoveryProviderResult> {
+  const wantsIndia = config.locations.some((value) => /india|bengaluru|bangalore|hyderabad|pune|mumbai|delhi|gurugram|noida|chennai/i.test(value));
+  const wantsRemote = config.workModes.some((value) => value.toLowerCase() === "remote")
+    || config.locations.some((value) => /remote|worldwide|global|apac/i.test(value));
+  const query = config.keywords.slice(0, 8).join(" ");
+  const urls: URL[] = [];
+  if (wantsIndia) {
+    const indiaUrl = new URL("https://freehire.me/api/v1/agent/jobs/search");
+    indiaUrl.searchParams.set("q", query);
+    indiaUrl.searchParams.set("countries", "IN");
+    indiaUrl.searchParams.set("posted_within_days", "30");
+    indiaUrl.searchParams.set("description_format", "text");
+    indiaUrl.searchParams.set("limit", "50");
+    urls.push(indiaUrl);
+  }
+  if (wantsRemote) {
+    const remoteUrl = new URL("https://freehire.me/api/v1/agent/jobs/search");
+    remoteUrl.searchParams.set("q", query);
+    remoteUrl.searchParams.set("work_mode", "remote");
+    for (const region of ["global", "apac", "none"]) remoteUrl.searchParams.append("regions", region);
+    remoteUrl.searchParams.set("posted_within_days", "30");
+    remoteUrl.searchParams.set("description_format", "text");
+    remoteUrl.searchParams.set("limit", "50");
+    urls.push(remoteUrl);
+  }
+  if (!urls.length) return { provider: "Freehire", discovered: 0, candidates: [] };
+  const responses = await Promise.all(urls.map((url) => safeJsonFetch(url.toString()).then((response) => response.json() as Promise<{ data?: FreehireJob[] }>)));
+  const jobs = [...new Map(responses.flatMap((payload) => payload.data ?? []).map((job) => [asString(job.public_slug, asString(job.url)), job])).values()];
+  const candidates = jobs.map((job): JobInput => {
+    const regions = Array.isArray(job.regions) ? job.regions : [];
+    const countries = Array.isArray(job.countries) ? job.countries : [];
+    const cities = Array.isArray(job.cities) ? job.cities : [];
+    const location = asString(job.location, [...cities, ...countries].join(", ") || "Not specified");
+    const applicationUrl = asString(job.url, job.public_slug ? `https://freehire.me/jobs/${job.public_slug}` : "");
+    return {
+      externalId: asString(job.public_slug, asString(job.external_id, applicationUrl)),
+      company: asString(job.company, "Unknown company"),
+      role: asString(job.title, "Untitled role"),
+      location,
+      workMode: freehireWorkMode(job),
+      platform: "Freehire",
+      applicationUrl,
+      postedDate: asString(job.posted_at),
+      description: stripHtml([asString(job.description), ...(job.skills ?? [])].filter(Boolean).join(" ")),
+      compensation: freehireSalary(job),
+      eligibilityHint: `regions: ${regions.join(", ")}; countries: ${countries.join(", ")}; cities: ${cities.join(", ")}`,
+    };
+  }).filter((job) => job.applicationUrl && isDiscoveryCandidate(job, config));
+  return { provider: "Freehire", discovered: jobs.length, candidates };
+}
+
+async function fetchRemotiveDiscovery(config: DiscoveryConfig): Promise<DiscoveryProviderResult> {
+  const url = new URL("https://remotive.com/api/remote-jobs");
+  url.searchParams.set("category", "software-dev");
+  url.searchParams.set("limit", "100");
+  const payload = await safeJsonFetch(url.toString()).then((response) => response.json() as Promise<{ jobs?: RemotiveJob[] }>);
+  const jobs = payload.jobs ?? [];
+  const candidates = jobs.map((job): JobInput => ({
+    externalId: String(job.id ?? job.url ?? ""),
+    company: asString(job.company_name, "Unknown company"),
+    role: asString(job.title, "Untitled role"),
+    location: asString(job.candidate_required_location, "Remote"),
+    workMode: "Remote",
+    platform: "Remotive",
+    applicationUrl: asString(job.url),
+    postedDate: asString(job.publication_date),
+    description: stripHtml(`${asString(job.description)} ${asString(job.category)} ${asString(job.job_type)}`),
+    compensation: asString(job.salary),
+    eligibilityHint: asString(job.candidate_required_location),
+  })).filter((job) => job.applicationUrl && isDiscoveryCandidate(job, config));
+  return { provider: "Remotive", discovered: jobs.length, candidates };
 }
 
 async function fetchAdzunaDiscovery(config: DiscoveryConfig, env: Env): Promise<DiscoveryProviderResult> {
@@ -1827,15 +1959,19 @@ async function runDiscovery(
   startedAt: string,
 ) {
   await requireActiveEvidence(env, user.id);
-  const config = discoveryConfig(body);
+  const profile = await profileForUser(env, user);
+  const requestedConfig = discoveryConfig(body);
+  const config = { ...requestedConfig, keywords: expandSearchKeywords(requestedConfig.keywords, profile) };
   const mode = body.mode === "SCHEDULED" ? "SCHEDULED" : "PUBLIC_FEEDS";
   const force = body.force === true || mode === "SCHEDULED";
-  const searchRow = await upsertDiscoverySearch(env, user.id, config, startedAt);
+  const searchRow = await upsertDiscoverySearch(env, user.id, requestedConfig, startedAt);
   const searchId = asString(searchRow?.id);
-  const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+  // Remotive asks public API users to fetch no more than four times per day.
+  // The complete saved-search result is therefore reused for six hours.
+  const cacheWindowStart = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString();
   const recent = await env.DB.prepare(
     "SELECT * FROM discovery_runs WHERE user_id = ? AND search_id = ? AND mode = 'PUBLIC_FEEDS' AND completed_at >= ? ORDER BY completed_at DESC LIMIT 1",
-  ).bind(user.id, searchId, oneHourAgo).first<Record<string, unknown>>();
+  ).bind(user.id, searchId, cacheWindowStart).first<Record<string, unknown>>();
   if (!force && recent) return { ...rowToDiscoveryRun(recent), cached: true };
 
   const runId = crypto.randomUUID();
@@ -1846,13 +1982,17 @@ async function runDiscovery(
      VALUES (?, ?, ?, ?, 'RUNNING', '[]', 0, 0, 0, 0, '{}', ?, NULL)`,
   ).bind(runId, user.id, searchId, mode, startedAt).run();
 
-  const providerReports: Array<{ provider: string; discovered: number; relevant: number; imported: number; duplicates: number }> = [];
+  const providerReports: Array<{ provider: string; discovered: number; relevant: number; imported: number; duplicates: number; eligible?: number; verify?: number; ineligible?: number }> = [];
   const failures: Array<{ provider: string; message: string }> = [];
   const candidates: JobInput[] = [];
   const connectors: Array<{ provider: string; run: () => Promise<DiscoveryProviderResult> }> = [
+    { provider: "Freehire", run: () => fetchFreehireDiscovery(config) },
     { provider: "Jobicy", run: () => fetchJobicyDiscovery(config) },
     { provider: "Arbeitnow", run: () => fetchArbeitnowDiscovery(config) },
   ];
+  if (config.workModes.some((value) => value.toLowerCase() === "remote") || config.locations.some((value) => /remote|worldwide|global|apac/i.test(value))) {
+    connectors.push({ provider: "Remotive", run: () => fetchRemotiveDiscovery(config) });
+  }
   if (env.ADZUNA_APP_ID && env.ADZUNA_APP_KEY) connectors.push({ provider: "Adzuna India", run: () => fetchAdzunaDiscovery(config, env) });
   if (env.JOOBLE_API_KEY) connectors.push({ provider: "Jooble", run: () => fetchJoobleDiscovery(config, env) });
   if (env.SERPAPI_API_KEY) connectors.push({ provider: "Google Jobs", run: () => fetchGoogleJobsDiscovery(config, env) });
@@ -1891,7 +2031,6 @@ async function runDiscovery(
     }
   }
 
-  const profile = await profileForUser(env, user);
   let duplicates = providerReports.reduce((sum, report) => sum + report.duplicates, 0);
   const runRows: Array<Record<string, unknown>> = [];
   for (const candidate of candidates.slice(0, 180)) {
@@ -1903,6 +2042,9 @@ async function runDiscovery(
     if (provider) {
       provider.imported += saved.duplicate ? 0 : 1;
       provider.duplicates += saved.duplicate ? 1 : 0;
+      if (scored.eligibility.decision === "ELIGIBLE") provider.eligible = Number(provider.eligible ?? 0) + 1;
+      else if (scored.eligibility.decision === "VERIFY") provider.verify = Number(provider.verify ?? 0) + 1;
+      else provider.ineligible = Number(provider.ineligible ?? 0) + 1;
     }
     if (saved.preserved) {
       const preserved = await env.DB.prepare("SELECT * FROM job_matches WHERE id = ? AND user_id = ?").bind(saved.id, user.id).first<Record<string, unknown>>();
@@ -1940,6 +2082,13 @@ async function runDiscovery(
     config,
     providerReports,
     failures,
+    screening: {
+      fetched: providerReports.reduce((sum, provider) => sum + provider.discovered, 0),
+      roleOrLocationFiltered: providerReports.reduce((sum, provider) => sum + provider.relevant, 0),
+      indiaEligible: providerReports.reduce((sum, provider) => sum + Number(provider.eligible ?? 0), 0),
+      eligibilityNeedsVerification: providerReports.reduce((sum, provider) => sum + Number(provider.verify ?? 0), 0),
+      locationRestricted: providerReports.reduce((sum, provider) => sum + Number(provider.ineligible ?? 0), 0),
+    },
     topOpportunities: topRows.map(rowToJob),
     highestPriority: selectHighestPriority(qualified, 3).map(rowToJob),
     autoStaged,

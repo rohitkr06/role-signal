@@ -5,6 +5,7 @@ import { StudioView, type StudioContent, type StudioDocument } from "./studio-vi
 import { ExecutionView, type ApplicationExecution, type CompanionDevice, type ExecutionSettings } from "./execution-view";
 
 type View = "dashboard" | "discovery" | "matches" | "sources" | "runs" | "autopilot" | "applications" | "studio" | "execution" | "profile";
+type DiscoveryScope = "BOTH" | "INDIA" | "GLOBAL_REMOTE";
 
 type Profile = {
   name: string;
@@ -40,6 +41,13 @@ type MatchJob = {
   breakdown?: Record<string, number>;
   semanticMatches?: Array<{ requirement: string; evidence: string; confidence: "high" | "medium" }>;
   enrichedAt?: string;
+  eligibility?: {
+    decision: "ELIGIBLE" | "VERIFY" | "INELIGIBLE";
+    status: string;
+    label: string;
+    confidence: "high" | "medium" | "low";
+    reasons: string[];
+  };
 };
 
 type ApplicationPacket = {
@@ -113,7 +121,7 @@ type DiscoveryRun = {
   searchId?: string;
   mode: string;
   status: string;
-  providers: Array<{ provider: string; discovered: number; relevant?: number; imported: number; duplicates: number }>;
+  providers: Array<{ provider: string; discovered: number; relevant?: number; imported: number; duplicates: number; eligible?: number; verify?: number; ineligible?: number }>;
   discovered: number;
   imported: number;
   duplicates: number;
@@ -128,6 +136,13 @@ type DiscoveryRun = {
     sourceUrl?: string;
     rejected?: number;
     alertsCreated?: number;
+    screening?: {
+      fetched: number;
+      roleOrLocationFiltered: number;
+      indiaEligible: number;
+      eligibilityNeedsVerification: number;
+      locationRestricted: number;
+    };
   };
   startedAt: string;
   completedAt?: string;
@@ -286,6 +301,19 @@ function postedLabel(value?: string) {
   return Number.isNaN(date.getTime()) ? value : date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
+function scopeFromLocations(locations: string[]): DiscoveryScope {
+  const text = locations.join(" ").toLowerCase();
+  const india = /india|bengaluru|bangalore|hyderabad|pune|mumbai|delhi|gurugram|noida|chennai/.test(text);
+  const remote = /remote|worldwide|global|apac/.test(text);
+  return india && remote ? "BOTH" : india ? "INDIA" : "GLOBAL_REMOTE";
+}
+
+function scopeSettings(scope: DiscoveryScope) {
+  if (scope === "INDIA") return { locations: "India", workModes: ["Remote", "Hybrid", "On-site"] };
+  if (scope === "GLOBAL_REMOTE") return { locations: "Remote, Worldwide, APAC", workModes: ["Remote"] };
+  return { locations: "India, Remote, Worldwide, APAC", workModes: ["Remote", "Hybrid", "On-site"] };
+}
+
 export function RoleSignalApp() {
   const [view, setView] = useState<View>("dashboard");
   const [profile, setProfile] = useState<Profile>(fallbackProfile);
@@ -333,11 +361,12 @@ export function RoleSignalApp() {
   const [sourceForm, setSourceForm] = useState({ provider: "greenhouse", token: "", label: "" });
   const [jobForm, setJobForm] = useState({ jobUrl: "", company: "", role: "", location: "", postedDate: "", description: "" });
   const [discoveryForm, setDiscoveryForm] = useState({
-    name: "Backend roles / India + Remote",
+    name: "Backend roles / India + Global Remote",
     keywords: "Backend Engineer, Software Engineer, Platform Engineer, Node.js",
-    locations: "India, Remote, APAC",
-    workModes: ["Remote", "Hybrid"],
-    minScore: 75,
+    locations: "India, Remote, Worldwide, APAC",
+    workModes: ["Remote", "Hybrid", "On-site"],
+    minScore: 65,
+    scope: "BOTH" as DiscoveryScope,
   });
   const [alertForm, setAlertForm] = useState({ provider: "LinkedIn", subject: "", content: "" });
   const [alertFeedback, setAlertFeedback] = useState<{ tone: "success" | "error"; message: string } | null>(null);
@@ -370,6 +399,7 @@ export function RoleSignalApp() {
     { name: "Instahyre", mark: "I", note: "Curated tech hiring", url: `https://www.instahyre.com/search-jobs/` },
     { name: "Hirist", mark: "H", note: "Engineering roles", url: `https://www.hirist.tech/` },
     { name: "Foundit", mark: "F", note: "India listings", url: `https://www.foundit.in/search/${encodeURIComponent(primaryKeyword)}-jobs` },
+    { name: "Weekday", mark: "W", note: "India startup roles", url: `https://www.weekday.works/jobs?query=${encodeURIComponent(primaryKeyword)}` },
     { name: "YC Startups", mark: "Y", note: "Work at a Startup", url: `https://www.ycombinator.com/jobs?role=eng` },
   ];
 
@@ -428,6 +458,7 @@ export function RoleSignalApp() {
           locations: search.locations.join(", "),
           workModes: search.workModes,
           minScore: search.minScore,
+          scope: scopeFromLocations(search.locations),
         });
       }
       setAnswerVault(data.answerVault || []);
@@ -1160,23 +1191,26 @@ export function RoleSignalApp() {
 
         {view === "discovery" && (
           <div className="page inner-page discovery-page">
-            <PageTitle eyebrow="Unified discovery" title="One search. The best India-focused sources." copy="RoleSignal checks verified job APIs, official company boards and portal alerts, then removes duplicates and ranks every opportunity against your active resume evidence." action={profileStatus !== "VERIFIED" ? "Confirm profile first" : busy === "discovery-run" ? "Searching every source..." : "Find my best matches"} actionDisabled={busy === "discovery-run" || profileStatus !== "VERIFIED"} onAction={() => void runDiscovery()} />
+            <PageTitle eyebrow="Unified discovery" title="One search. India and worldwide remote." copy="RoleSignal searches open job data, official company boards and your portal alerts, then separates resume fit from whether an applicant in India can actually apply." action={profileStatus !== "VERIFIED" ? "Confirm profile first" : busy === "discovery-run" ? "Searching every source..." : "Find my best matches"} actionDisabled={busy === "discovery-run" || profileStatus !== "VERIFIED"} onAction={() => void runDiscovery()} />
 
             <section className="discovery-hero-grid">
               <form className="discovery-config-card" onSubmit={runDiscovery}>
                 <div className="card-heading"><div><span className="card-kicker">Your search profile</span><h2>Tell us what good looks like</h2></div><span className="verified-tag">Resume-linked</span></div>
                 <label>Search name<input value={discoveryForm.name} onChange={(event) => setDiscoveryForm({ ...discoveryForm, name: event.target.value })} /></label>
+                <div className="search-scope"><span>Where should RoleSignal search?</span><div>{([[
+                  "BOTH", "India + global remote"
+                ], ["INDIA", "India only"], ["GLOBAL_REMOTE", "Global remote"]] as Array<[DiscoveryScope, string]>).map(([scope, label]) => <button type="button" key={scope} className={discoveryForm.scope === scope ? "active" : ""} onClick={() => setDiscoveryForm({ ...discoveryForm, scope, ...scopeSettings(scope) })}>{label}</button>)}</div><small>Worldwide roles are checked for India, APAC, global, or international-contractor eligibility.</small></div>
                 <label>Roles and technologies<input value={discoveryForm.keywords} onChange={(event) => setDiscoveryForm({ ...discoveryForm, keywords: event.target.value })} placeholder="Backend Engineer, Platform Engineer, Node.js" /><small>RoleSignal searches all connected sources with these terms.</small></label>
                 <label>Locations<input value={discoveryForm.locations} onChange={(event) => setDiscoveryForm({ ...discoveryForm, locations: event.target.value })} placeholder="India, Bengaluru, Remote" /></label>
-                <div className="discovery-controls"><label>Minimum match<input type="number" min={65} max={95} value={discoveryForm.minScore} onChange={(event) => setDiscoveryForm({ ...discoveryForm, minScore: Number(event.target.value) })} /></label><div><span>Work modes</span><div className="mode-pills">{["Remote", "Hybrid", "On-site"].map((mode) => <button type="button" key={mode} className={discoveryForm.workModes.includes(mode) ? "active" : ""} onClick={() => setDiscoveryForm({ ...discoveryForm, workModes: discoveryForm.workModes.includes(mode) ? discoveryForm.workModes.filter((value) => value !== mode) : [...discoveryForm.workModes, mode] })}>{mode}</button>)}</div></div></div>
+                <div className="discovery-controls"><label>Minimum match<input type="number" min={50} max={95} value={discoveryForm.minScore} onChange={(event) => setDiscoveryForm({ ...discoveryForm, minScore: Number(event.target.value) })} /></label><div><span>Work modes</span><div className="mode-pills">{["Remote", "Hybrid", "On-site"].map((mode) => <button type="button" key={mode} className={discoveryForm.workModes.includes(mode) ? "active" : ""} onClick={() => setDiscoveryForm({ ...discoveryForm, workModes: discoveryForm.workModes.includes(mode) ? discoveryForm.workModes.filter((value) => value !== mode) : [...discoveryForm.workModes, mode] })}>{mode}</button>)}</div></div></div>
                 <button className="primary-button wide" disabled={busy === "discovery-run"}>{busy === "discovery-run" ? "Fetching, deduplicating and scoring..." : "Find and rank matching jobs"}</button>
-                <p className="refresh-note">One click checks every connected automatic source. Results are cached for one hour.</p>
+                <p className="refresh-note">One click checks every connected automatic source. The same saved search is reused for six hours to respect source limits.</p>
               </form>
 
               <aside className="coverage-card phase8-coverage">
-                <span className="card-kicker">Discovery status</span><h2>{activeDiscoverySources.length} sources ready now</h2><p>Protected portals stay outside RoleSignal. Their official alerts flow into the same scoring pipeline without storing portal passwords.</p>
+                <span className="card-kicker">Discovery status</span><h2>Useful before you add any API keys</h2><p>Freehire and Remotive provide open India and remote coverage. Optional APIs, company boards and portal alerts widen the search without storing portal passwords.</p>
                 <div className="coverage-stat"><strong>{activeDiscoverySources.length}</strong><span>automatic<br />sources</span></div>
-                <div className="coverage-row"><span className="coverage-mark public">01</span><span><strong>India-wide APIs</strong><small>Adzuna and Jooble join the public feeds when keys are connected</small></span><b>Automatic</b></div>
+                <div className="coverage-row"><span className="coverage-mark public">01</span><span><strong>India + global remote APIs</strong><small>Freehire and Remotive work without keys; Adzuna and Jooble are optional</small></span><b>Automatic</b></div>
                 <div className="coverage-row"><span className="coverage-mark ats">02</span><span><strong>Official career boards</strong><small>{sources.length ? `${sources.length} employer boards connected` : "Ready for your target-employer list"}</small></span><b>Automatic</b></div>
                 <div className="coverage-row"><span className="coverage-mark portal">03</span><span><strong>Portal alert inbox</strong><small>LinkedIn, Naukri, Indeed and Foundit alert emails</small></span><b>Safe import</b></div>
               </aside>
@@ -1188,8 +1222,8 @@ export function RoleSignalApp() {
             </section>
 
             <section className="alert-ingestion-section">
-              <div className="alert-inbox-explainer"><span className="card-kicker">Portal alert inbox</span><h2>Let the portals send jobs to you</h2><p>Create daily alerts once on LinkedIn, Naukri, Indeed or Foundit. RoleSignal extracts their job links, merges duplicates and scores them with the same resume model.</p><ol><li><b>1</b><span>Create a daily alert on the portal.</span></li><li><b>2</b><span>Copy the complete alert email for now; automatic forwarding uses the same endpoint when connected.</span></li><li><b>3</b><span>Paste it here and RoleSignal does the rest.</span></li></ol>{latestAlertImport && <div className="latest-alert-import"><span>Last import</span><strong>{latestAlertImport.provider} / {latestAlertImport.jobsFound} found / {latestAlertImport.imported} new</strong><small>{postedLabel(latestAlertImport.createdAt)}</small></div>}</div>
-              <form className="alert-import-card" onSubmit={importJobAlert}><div className="card-heading"><span className="card-kicker">Import a job alert</span><button type="button" onClick={() => void pasteJobAlert()}>Paste email</button></div><div className="alert-form-row"><label>Portal<select value={alertForm.provider} onChange={(event) => setAlertForm({ ...alertForm, provider: event.target.value })}>{["LinkedIn", "Naukri", "Indeed", "Foundit", "Instahyre", "Cutshort", "Other"].map((provider) => <option key={provider}>{provider}</option>)}</select></label><label>Email subject<input value={alertForm.subject} onChange={(event) => setAlertForm({ ...alertForm, subject: event.target.value })} placeholder="Daily jobs for Backend Engineer" /></label></div><label>Complete alert email<textarea required rows={10} value={alertForm.content} onChange={(event) => setAlertForm({ ...alertForm, content: event.target.value })} placeholder="Paste the complete text or HTML of the job-alert email here..." /></label><button className="primary-button wide" disabled={busy === "alert-import" || profileStatus !== "VERIFIED"}>{profileStatus !== "VERIFIED" ? "Confirm profile before importing" : busy === "alert-import" ? "Extracting and scoring jobs..." : "Import, deduplicate and score"}</button>{alertFeedback && <div role="status" className={`operation-feedback ${alertFeedback.tone}`}>{alertFeedback.message}</div>}<p>Your portal password and session never enter RoleSignal.</p></form>
+              <div className="alert-inbox-explainer"><span className="card-kicker">Portal alert inbox</span><h2>Let the portals send jobs to you</h2><p>Create daily alerts once on LinkedIn, Naukri, Indeed, Foundit or Weekday. RoleSignal extracts their job links, merges duplicates and scores them with the same resume model.</p><ol><li><b>1</b><span>Create a daily alert on the portal.</span></li><li><b>2</b><span>Copy the complete alert email for now; automatic forwarding uses the same endpoint when connected.</span></li><li><b>3</b><span>Paste it here and RoleSignal does the rest.</span></li></ol>{latestAlertImport && <div className="latest-alert-import"><span>Last import</span><strong>{latestAlertImport.provider} / {latestAlertImport.jobsFound} found / {latestAlertImport.imported} new</strong><small>{postedLabel(latestAlertImport.createdAt)}</small></div>}</div>
+              <form className="alert-import-card" onSubmit={importJobAlert}><div className="card-heading"><span className="card-kicker">Import a job alert</span><button type="button" onClick={() => void pasteJobAlert()}>Paste email</button></div><div className="alert-form-row"><label>Portal<select value={alertForm.provider} onChange={(event) => setAlertForm({ ...alertForm, provider: event.target.value })}>{["LinkedIn", "Naukri", "Indeed", "Foundit", "Weekday", "Instahyre", "Cutshort", "Other"].map((provider) => <option key={provider}>{provider}</option>)}</select></label><label>Email subject<input value={alertForm.subject} onChange={(event) => setAlertForm({ ...alertForm, subject: event.target.value })} placeholder="Daily jobs for Backend Engineer" /></label></div><label>Complete alert email<textarea required rows={10} value={alertForm.content} onChange={(event) => setAlertForm({ ...alertForm, content: event.target.value })} placeholder="Paste the complete text or HTML of the job-alert email here..." /></label><button className="primary-button wide" disabled={busy === "alert-import" || profileStatus !== "VERIFIED"}>{profileStatus !== "VERIFIED" ? "Confirm profile before importing" : busy === "alert-import" ? "Extracting and scoring jobs..." : "Import, deduplicate and score"}</button>{alertFeedback && <div role="status" className={`operation-feedback ${alertFeedback.tone}`}>{alertFeedback.message}</div>}<p>Your portal password and session never enter RoleSignal.</p></form>
             </section>
 
             <section className="portal-search-section">
@@ -1199,8 +1233,10 @@ export function RoleSignalApp() {
 
             {latestDiscovery && <section className="discovery-results">
               <div className="discovery-results-head"><div><span className="card-kicker">Latest discovery / {readableStatus(latestDiscovery.mode)}</span><h2>{latestDiscovery.qualified} qualified matches surfaced</h2><p>{latestDiscovery.discovered} listings inspected, {latestDiscovery.imported} new jobs imported and {latestDiscovery.duplicates} duplicates merged.</p></div><div><span className={`run-status ${latestDiscovery.status.toLowerCase()}`}>{readableStatus(latestDiscovery.status)}</span><a className="secondary-button" href={`/api/rolesignal/export/discovery-run.md?id=${encodeURIComponent(latestDiscovery.id)}`} download>Download report</a></div></div>
-              <div className="provider-strip">{latestDiscovery.providers.map((provider) => <span key={provider.provider}><strong>{provider.provider}</strong><small>{provider.discovered} checked / {provider.imported} new</small></span>)}</div>
-              {(latestDiscovery.report.highestPriority || []).length ? <><div className="section-heading discovery-priority-heading"><div><span className="eyebrow">Highest priority</span><h2>Best applications from this run</h2></div><button className="text-button" onClick={() => setView("matches")}>Review full match list -&gt;</button></div><div className="priority-grid">{(latestDiscovery.report.highestPriority || []).map((job, index) => <article className="priority-card" key={job.id}><span className="priority-number">0{index + 1}</span><span className="card-kicker">{job.company} / {job.platform}</span><h3>{job.role}</h3><p>{job.location} / {job.workMode}</p><div className="priority-score"><strong>{job.score}</strong><span>match<br />score</span></div><button className="text-button" onClick={() => void prepareApplication(job)}>Prepare application -&gt;</button></article>)}</div></> : <div className="discovery-no-match"><strong>No qualified roles in this run.</strong><span>Broaden the location or role terms, or capture another portal results page.</span></div>}
+              <div className="provider-strip">{latestDiscovery.providers.map((provider) => <span key={provider.provider}><strong>{provider.provider}</strong><small>{provider.discovered} checked / {provider.relevant ?? provider.imported} relevant / {provider.imported} new</small>{provider.eligible !== undefined && <small className="provider-eligibility">{provider.eligible} India-ready / {provider.verify || 0} verify / {provider.ineligible || 0} restricted</small>}</span>)}</div>
+              {latestDiscovery.report.screening && <div className="screening-grid"><span><strong>{latestDiscovery.report.screening.fetched}</strong><small>Fetched</small></span><span><strong>{latestDiscovery.report.screening.roleOrLocationFiltered}</strong><small>Role/location fit</small></span><span className="eligible"><strong>{latestDiscovery.report.screening.indiaEligible}</strong><small>India-ready</small></span><span className="verify"><strong>{latestDiscovery.report.screening.eligibilityNeedsVerification}</strong><small>Verify eligibility</small></span><span className="restricted"><strong>{latestDiscovery.report.screening.locationRestricted}</strong><small>Restricted</small></span></div>}
+              {latestDiscovery.report.failures?.length ? <div className="discovery-failures"><strong>Some sources need attention</strong>{latestDiscovery.report.failures.map((failure) => <span key={`${failure.provider}-${failure.message}`}><b>{failure.provider}</b>{failure.message}</span>)}</div> : null}
+              {(latestDiscovery.report.highestPriority || []).length ? <><div className="section-heading discovery-priority-heading"><div><span className="eyebrow">Highest priority</span><h2>Best applications from this run</h2></div><button className="text-button" onClick={() => setView("matches")}>Review full match list -&gt;</button></div><div className="priority-grid">{(latestDiscovery.report.highestPriority || []).map((job, index) => <article className="priority-card" key={job.id}><span className="priority-number">0{index + 1}</span><span className="card-kicker">{job.company} / {job.platform}</span><h3>{job.role}</h3><p>{job.location} / {job.workMode}</p>{job.eligibility && <span className={`eligibility-badge ${job.eligibility.decision.toLowerCase()}`}>{job.eligibility.label}</span>}<div className="priority-score"><strong>{job.score}</strong><span>match<br />score</span></div><button className="text-button" disabled={job.status === "SKIPPED"} onClick={() => void prepareApplication(job)}>{job.status === "SKIPPED" ? "Location restricted" : "Prepare application ->"}</button></article>)}</div></> : <div className="discovery-no-match"><strong>No qualified roles in this run.</strong><span>{latestDiscovery.report.screening?.locationRestricted ? `${latestDiscovery.report.screening.locationRestricted} otherwise relevant role${latestDiscovery.report.screening.locationRestricted === 1 ? " was" : "s were"} location-restricted. ` : ""}Try broader role terms, lower the match threshold, or capture another portal results page.</span></div>}
             </section>}
 
             {discoveryRuns.length > 0 && <section className="run-history discovery-history"><div className="section-heading"><div><span className="eyebrow">Discovery history</span><h2>Public and portal runs together</h2></div></div>{discoveryRuns.slice(0, 8).map((run) => <div className="run-row" key={run.id}><span className={`run-status ${run.status.toLowerCase()}`}>{readableStatus(run.status)}</span><span><strong>{readableStatus(run.mode)}</strong><small>{postedLabel(run.completedAt || run.startedAt)} / {run.discovered} checked / {run.imported} new</small></span><span><b>{run.qualified}</b><small>qualified</small></span><a href={`/api/rolesignal/export/discovery-run.md?id=${encodeURIComponent(run.id)}`} download>Report</a></div>)}</section>}
@@ -1215,6 +1251,8 @@ export function RoleSignalApp() {
               <span className="filter">Exceptional {displayJobs.filter((job) => job.score >= 90).length}</span>
               <span className="filter">Strong {displayJobs.filter((job) => job.score >= 82 && job.score < 90).length}</span>
               <span className="filter">Good {displayJobs.filter((job) => job.score >= 75 && job.score < 82).length}</span>
+              <span className="filter">Borderline {displayJobs.filter((job) => job.score >= 65 && job.score < 75).length}</span>
+              <span className="filter">Stretch {displayJobs.filter((job) => job.score >= 50 && job.score < 65).length}</span>
             </div>
             <div className="matches-layout">
               <div className="job-stack expanded">
@@ -1281,7 +1319,7 @@ export function RoleSignalApp() {
             <form className="automation-command-card" onSubmit={saveSchedule}>
               <div className="automation-state"><span className={scheduleEnabled ? "automation-orb on" : "automation-orb"} /><span><strong>{scheduleEnabled ? "Scheduled discovery is active" : "Scheduled discovery is paused"}</strong><small>{automation?.lastRunAt ? `Last run ${postedLabel(automation.lastRunAt)} / next ${postedLabel(automation.nextRunAt)}` : "Save a cadence to begin background discovery."}</small></span></div>
               <label>Cadence<select value={cadenceHours} onChange={(event) => setCadenceHours(Number(event.target.value))}><option value={6}>Every 6 hours</option><option value={12}>Every 12 hours</option><option value={24}>Daily</option><option value={72}>Every 3 days</option></select></label>
-              <label>Alert threshold<input type="number" min={75} max={95} value={alertThreshold} onChange={(event) => setAlertThreshold(Number(event.target.value))} /></label>
+              <label>Alert threshold<input type="number" min={65} max={95} value={alertThreshold} onChange={(event) => setAlertThreshold(Number(event.target.value))} /></label>
               <button type="button" className={scheduleEnabled ? "switch large on" : "switch large"} onClick={() => setScheduleEnabled(!scheduleEnabled)} aria-label="Toggle scheduled discovery"><span /></button>
               <button className="primary-button" disabled={busy === "automation-save"}>{busy === "automation-save" ? "Saving..." : "Save schedule"}</button>
             </form>
@@ -1297,7 +1335,7 @@ export function RoleSignalApp() {
                 <button className="primary-button wide" onClick={() => void saveRules()}>Save automation rules</button>
               </section>
               <aside className="guardrail-card">
-                <div className="shield-mark">✓</div><span className="card-kicker">Browser companion v0.7</span><h3>Fill the facts. Stop at uncertainty.</h3><p>The paired extension consumes only your current approved queue, fills verified fields and reports every outcome back to RoleSignal.</p>
+                <div className="shield-mark">✓</div><span className="card-kicker">Browser companion v0.8</span><h3>Fill the facts. Stop at uncertainty.</h3><p>The paired extension consumes only your current approved queue, fills verified fields and reports every outcome back to RoleSignal.</p>
                 <ul><li><i>✓</i> Conservative Greenhouse, Lever and Ashby execution</li><li><i>✓</i> Host-locked application packets</li><li><i>✓</i> Unknown required-field and CAPTCHA pauses</li><li><i>✓</i> Portal-confirmed submission tracking</li></ul>
                 <button className="download-button" onClick={() => setView("execution")}>Open Assisted Apply</button>
               </aside>
@@ -1356,10 +1394,10 @@ function JobCard({ job, onReview, onAnalyze, expanded = false, busy = false, ana
   const ringStyle = { "--score": `${job.score * 3.6}deg` } as CSSProperties;
   const initials = job.company.split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase();
   return <article className={expanded ? "job-card expanded" : "job-card"}>
-    <div className="job-main"><div className="company-logo green">{initials}</div><div className="job-info"><div className="job-company"><span>{job.company}</span>{job.highPriority && <i>High priority</i>}</div><h3>{job.role}</h3><p>{job.location}<b>·</b>{job.workMode}<b>·</b>{postedLabel(job.postedDate)}<b>·</b>{job.platform}</p><div className="tag-row">{job.matchingExperience.slice(0, 3).map((tag) => <span key={tag}>{tag}</span>)}</div></div></div>
+    <div className="job-main"><div className="company-logo green">{initials}</div><div className="job-info"><div className="job-company"><span>{job.company}</span>{job.highPriority && <i>High priority</i>}{job.eligibility && <i className={`eligibility-badge ${job.eligibility.decision.toLowerCase()}`}>{job.eligibility.label}</i>}</div><h3>{job.role}</h3><p>{job.location}<b>·</b>{job.workMode}<b>·</b>{postedLabel(job.postedDate)}<b>·</b>{job.platform}</p><div className="tag-row">{job.matchingExperience.slice(0, 3).map((tag) => <span key={tag}>{tag}</span>)}</div></div></div>
     <div className="job-actions"><div className="score-ring" style={ringStyle}><span><b>{job.score}</b><small>match</small></span></div></div>
-    {expanded && <div className="job-explanation"><div><span className="fit-label">Evidence-semantic matches</span>{job.semanticMatches?.length ? job.semanticMatches.slice(0, 3).map((item) => <p key={item.requirement}><strong>{item.requirement}</strong> — {item.evidence}</p>) : job.matchingExperience.length ? job.matchingExperience.slice(0, 3).map((item) => <p key={item}>{item}</p>) : <p>No verified overlap was strong enough to cite.</p>}</div><div><span className="gap-label">Missing / watch-outs</span>{[...job.missingRequirements, ...job.redFlags].length ? [...job.missingRequirements, ...job.redFlags].slice(0, 3).map((item) => <p key={item}>{item}</p>) : <p>No material gap detected.</p>}</div></div>}
-    <div className="job-footer"><span className="match-class"><i />{job.classification} match{job.enrichedAt ? " / Full JD" : ""}</span><span>{readableStatus(job.status)}</span>{onAnalyze && <button className="analyze-action" disabled={analyzing} onClick={onAnalyze}>{analyzing ? "Analyzing..." : job.enrichedAt ? "Re-analyze JD" : "Deep-analyze JD"}</button>}<button disabled={busy || job.status === "SKIPPED"} onClick={onReview}>{busy ? "Preparing..." : job.status === "SKIPPED" ? "Not eligible" : "Prepare application"} -&gt;</button></div>
+    {expanded && <div className="job-explanation"><div><span className="fit-label">Evidence-semantic matches</span>{job.semanticMatches?.length ? job.semanticMatches.slice(0, 3).map((item) => <p key={item.requirement}><strong>{item.requirement}</strong> — {item.evidence}</p>) : job.matchingExperience.length ? job.matchingExperience.slice(0, 3).map((item) => <p key={item}>{item}</p>) : <p>No verified overlap was strong enough to cite.</p>}</div><div><span className="gap-label">Missing / watch-outs</span>{[...job.missingRequirements, ...job.redFlags].length ? [...job.missingRequirements, ...job.redFlags].slice(0, 3).map((item) => <p key={item}>{item}</p>) : <p>No material gap detected.</p>}{job.eligibility && <p className="eligibility-reason"><strong>{job.eligibility.label}</strong> — {job.eligibility.reasons[0]}</p>}</div></div>}
+    <div className="job-footer"><span className="match-class"><i />{job.classification} match{job.enrichedAt ? " / Full JD" : ""}</span><span>{readableStatus(job.status)}</span>{onAnalyze && <button className="analyze-action" disabled={analyzing} onClick={onAnalyze}>{analyzing ? "Analyzing..." : job.enrichedAt ? "Re-analyze JD" : "Deep-analyze JD"}</button>}<button disabled={busy || job.status === "SKIPPED"} onClick={onReview}>{busy ? "Preparing..." : job.status === "SKIPPED" ? job.eligibility?.decision === "INELIGIBLE" ? "Location restricted" : "Low match" : "Prepare application"} -&gt;</button></div>
   </article>;
 }
 
