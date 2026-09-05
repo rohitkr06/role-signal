@@ -48,6 +48,13 @@ interface Env {
   };
 }
 
+function databaseBindingError() {
+  return json({
+    error: "RoleSignal's database is not available in this runtime. For local development use `npm run dev`. For Railway, build the app and use the repository's `npm start` command so its local Cloudflare-compatible database is created.",
+    code: "DATABASE_BINDING_MISSING",
+  }, 503);
+}
+
 interface ExecutionContext {
   waitUntil(promise: Promise<unknown>): void;
   passThroughOnException(): void;
@@ -60,10 +67,11 @@ interface RoleSignalScheduledController {
 }
 
 const worker = {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  async fetch(request: Request, env: Env | undefined, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
     if (url.pathname.startsWith("/api/rolesignal/")) {
+      if (!env?.DB) return databaseBindingError();
       return handleRoleSignalApi(request, env, url, ctx);
     }
 
@@ -1053,11 +1061,24 @@ async function safeJsonFetch(urlValue: string, init: RequestInit = {}) {
     const headers = new Headers(init.headers);
     headers.set("accept", "application/json");
     headers.set("user-agent", "RoleSignal/8.0 unified job discovery");
-    const response = await fetch(target, { ...init, headers, redirect: "error", signal: controller.signal });
-    if (!response.ok) throw new Error(`The discovery provider returned ${response.status}.`);
-    const length = Number(response.headers.get("content-length") ?? 0);
-    if (length > 4_000_000) throw new Error("The discovery response is too large to process safely.");
-    return response;
+    let current = target;
+    let requestInit = { ...init };
+    for (let redirect = 0; redirect <= 4; redirect += 1) {
+      const response = await fetch(current, { ...requestInit, headers, redirect: "manual", signal: controller.signal });
+      if (response.status >= 300 && response.status < 400) {
+        const location = response.headers.get("location");
+        if (!location || redirect === 4) throw new Error("The discovery provider redirected too many times.");
+        current = new URL(location, current);
+        if (current.protocol !== "https:" || isPrivateHostname(current.hostname)) throw new Error("The discovery provider redirected to an unsafe address.");
+        if (response.status === 303) requestInit = { ...requestInit, method: "GET", body: undefined };
+        continue;
+      }
+      if (!response.ok) throw new Error(`The discovery provider returned ${response.status}.`);
+      const length = Number(response.headers.get("content-length") ?? 0);
+      if (length > 4_000_000) throw new Error("The discovery response is too large to process safely.");
+      return response;
+    }
+    throw new Error("The discovery provider could not be reached.");
   } finally {
     clearTimeout(timer);
   }
@@ -1970,7 +1991,11 @@ async function runDiscovery(
   // The complete saved-search result is therefore reused for six hours.
   const cacheWindowStart = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString();
   const recent = await env.DB.prepare(
-    "SELECT * FROM discovery_runs WHERE user_id = ? AND search_id = ? AND mode = 'PUBLIC_FEEDS' AND completed_at >= ? ORDER BY completed_at DESC LIMIT 1",
+    `SELECT * FROM discovery_runs
+     WHERE user_id = ? AND search_id = ? AND mode = 'PUBLIC_FEEDS'
+       AND status IN ('COMPLETED', 'PARTIAL') AND (imported > 0 OR duplicates > 0)
+       AND completed_at >= ?
+     ORDER BY completed_at DESC LIMIT 1`,
   ).bind(user.id, searchId, cacheWindowStart).first<Record<string, unknown>>();
   if (!force && recent) return { ...rowToDiscoveryRun(recent), cached: true };
 

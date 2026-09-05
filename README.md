@@ -38,6 +38,21 @@ Build and validate:
 npm test
 ```
 
+Run the production build locally with the same Cloudflare-compatible runtime used by the API:
+
+```bash
+npm run build
+npm start
+```
+
+Do not use `npm run start:node` for the full product. That command renders the interface but does not provide the D1 `DB` or R2 `RESUMES` bindings required by RoleSignal's API.
+
+## Railway
+
+RoleSignal can run on Railway without changing its Cloudflare Worker API. Configure Railway to use `npm run build` as the build command and `npm start` as the start command. The start command launches the built Worker with local D1 and R2-compatible storage and listens on Railway's `PORT`.
+
+Attach a Railway volume if profiles, resumes, and saved jobs must survive redeployments. The app automatically stores data beneath `RAILWAY_VOLUME_MOUNT_PATH`; on another host, set `ROLESIGNAL_DATA_DIR` to a persistent directory. Optional discovery API keys can be added as Railway environment variables.
+
 Generate a migration after changing `db/schema.ts`:
 
 ```bash
