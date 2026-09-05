@@ -1,3 +1,5 @@
+import { assessIndiaEligibility, type IndiaEligibilityAssessment } from "./job-eligibility";
+
 export type CandidateProfile = {
   name: string;
   email: string;
@@ -20,6 +22,7 @@ export type JobInput = {
   postedDate?: string;
   description: string;
   compensation?: string;
+  eligibilityHint?: string;
 };
 
 export type ScoreBreakdown = {
@@ -38,7 +41,7 @@ export type ScoreBreakdown = {
 export type ScoredJob = JobInput & {
   fingerprint: string;
   score: number;
-  classification: "Exceptional" | "Strong" | "Good" | "Borderline" | "Skip";
+  classification: "Exceptional" | "Strong" | "Good" | "Borderline" | "Stretch" | "Skip";
   status: "HIGH_PRIORITY" | "READY_TO_APPLY" | "BORDERLINE" | "SKIPPED";
   breakdown: ScoreBreakdown;
   matchingExperience: string[];
@@ -49,6 +52,7 @@ export type ScoredJob = JobInput & {
   resumeFit: "DEFAULT" | "CUSTOMIZE";
   resumeChanges: string[];
   semanticMatches: Array<{ requirement: string; evidence: string; confidence: "high" | "medium" }>;
+  eligibility: IndiaEligibilityAssessment;
 };
 
 export const EMPTY_PROFILE: CandidateProfile = {
@@ -196,6 +200,7 @@ export function scoreJob(profile: CandidateProfile, input: JobInput, now = new D
   const missingRequirements: string[] = [];
   const languageMismatch: string[] = [];
   const redFlags: string[] = [];
+  const eligibility = assessIndiaEligibility(input);
 
   const alignedDimension = (terms: string[], max: number) => {
     const required = terms.filter((term) => text.includes(term));
@@ -273,9 +278,12 @@ export function scoreJob(profile: CandidateProfile, input: JobInput, now = new D
     penalties,
   };
   const score = Math.max(0, Math.min(100, Object.values(breakdown).reduce((sum, value) => sum + value, 0)));
-  const classification = score >= 90 ? "Exceptional" : score >= 82 ? "Strong" : score >= 75 ? "Good" : score >= 65 ? "Borderline" : "Skip";
-  const highPriority = score >= 82 && backend >= 14 && distributed >= 9 && aiVoice >= 6;
-  const status = score < 65 || redFlags.some((flag) => /outside|domain mismatch|Requires 6|Requires 7|Requires 8|Requires 9/.test(flag))
+  if (eligibility.decision === "INELIGIBLE") redFlags.push(...eligibility.reasons);
+  else if (eligibility.decision === "VERIFY") redFlags.push(`Eligibility needs verification: ${eligibility.reasons[0]}`);
+
+  const classification = score >= 90 ? "Exceptional" : score >= 82 ? "Strong" : score >= 75 ? "Good" : score >= 65 ? "Borderline" : score >= 50 ? "Stretch" : "Skip";
+  const highPriority = score >= 82 && backend >= 14 && distributed >= 9 && aiVoice >= 6 && eligibility.decision === "ELIGIBLE";
+  const status = score < 50 || eligibility.decision === "INELIGIBLE" || redFlags.some((flag) => /outside the target|domain mismatch|Requires 6|Requires 7|Requires 8|Requires 9/.test(flag))
     ? "SKIPPED"
     : highPriority
       ? "HIGH_PRIORITY"
@@ -316,6 +324,7 @@ export function scoreJob(profile: CandidateProfile, input: JobInput, now = new D
     resumeFit: resumeChanges.length >= 2 ? "CUSTOMIZE" : "DEFAULT",
     resumeChanges: unique(resumeChanges).slice(0, 5),
     semanticMatches,
+    eligibility,
   };
 }
 

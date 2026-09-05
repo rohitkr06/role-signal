@@ -22,6 +22,8 @@ function captureVisibleJobs() {
     ? [".jobs-search-results__list-item", ".job-card-container", "[data-occludable-job-id]"]
     : portal === "Naukri"
       ? [".srp-jobtuple-wrapper", ".jobTuple", "article.jobTuple"]
+      : portal === "Weekday"
+        ? ["article", "li", "a[href*='/jobs/']", "[class*='job-card']", "[class*='jobCard']"]
       : portal === "Workday"
         ? ["[data-automation-id='jobTitle']", "[data-automation-id='jobSearchResult']", "li"]
         : portal === "Indeed"
@@ -66,6 +68,7 @@ function portalName() {
   const host = location.hostname.toLowerCase();
   if (host.includes("linkedin")) return "LinkedIn";
   if (host.includes("naukri")) return "Naukri";
+  if (host.includes("weekday.works")) return "Weekday";
   if (host.includes("myworkdayjobs") || host.includes("workday")) return "Workday";
   if (host.includes("indeed")) return "Indeed";
   if (host.includes("wellfound")) return "Wellfound";

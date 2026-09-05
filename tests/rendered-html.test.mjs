@@ -24,7 +24,7 @@ test("server-renders the RoleSignal product shell", async () => {
 });
 
 test("keeps trustworthy evidence, discovery, and guarded execution contracts in source", async () => {
-  const [worker, app, executionView, executionPolicy, studioView, documents, schema, extension, background, popup, manifest, scoring, vite, phase7Migration, phase8Migration, trustworthyMigration] = await Promise.all([
+  const [worker, app, executionView, executionPolicy, studioView, documents, schema, extension, background, popup, manifest, scoring, eligibility, vite, phase7Migration, phase8Migration, trustworthyMigration] = await Promise.all([
     readFile(new URL("../worker/index.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/rolesignal-app.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/execution-view.tsx", import.meta.url), "utf8"),
@@ -37,6 +37,7 @@ test("keeps trustworthy evidence, discovery, and guarded execution contracts in 
     readFile(new URL("../browser-extension/popup.js", import.meta.url), "utf8"),
     readFile(new URL("../browser-extension/manifest.json", import.meta.url), "utf8"),
     readFile(new URL("../lib/rolesignal.ts", import.meta.url), "utf8"),
+    readFile(new URL("../lib/job-eligibility.ts", import.meta.url), "utf8"),
     readFile(new URL("../vite.config.ts", import.meta.url), "utf8"),
     readFile(new URL("../drizzle/0006_phase7_execution.sql", import.meta.url), "utf8"),
     readFile(new URL("../drizzle/0007_phase8_unified_discovery.sql", import.meta.url), "utf8"),
@@ -58,6 +59,8 @@ test("keeps trustworthy evidence, discovery, and guarded execution contracts in 
   assert.match(worker, /api\/job-board-api/);
   assert.match(worker, /api\.adzuna\.com\/v1\/api\/jobs\/in\/search/);
   assert.match(worker, /jooble\.org\/api/);
+  assert.match(worker, /freehire\.me\/api\/v1\/agent\/jobs\/search/);
+  assert.match(worker, /remotive\.com\/api\/remote-jobs/);
   assert.match(worker, /serpapi\.com\/search\.json/);
   assert.match(worker, /\/api\/rolesignal\/sources\/scan/);
   assert.match(worker, /\/api\/rolesignal\/sources\/scan-all/);
@@ -112,7 +115,8 @@ test("keeps trustworthy evidence, discovery, and guarded execution contracts in 
   assert.match(app, /Confirm profile first/);
   assert.match(app, /No live matches yet/);
   assert.match(app, /const displayJobs = liveJobs/);
-  assert.match(app, /One search\. The best India-focused sources\./);
+  assert.match(app, /One search\. India and worldwide remote\./);
+  assert.match(app, /India \+ global remote/);
   assert.match(app, /Portal alert inbox/);
   assert.match(app, /Your job search keeps watch/);
   assert.match(app, /Signal inbox/);
@@ -144,7 +148,10 @@ test("keeps trustworthy evidence, discovery, and guarded execution contracts in 
   assert.match(background, /rolesignal-execution/);
   assert.match(background, /\/api\/rolesignal\/companion\/claim/);
   assert.match(background, /\/api\/rolesignal\/companion\/report/);
-  assert.match(manifest, /"version": "0\.7\.0"/);
+  assert.match(manifest, /"version": "0\.8\.0"/);
+  assert.match(extension, /Weekday/);
+  assert.match(eligibility, /assessIndiaEligibility/);
+  assert.match(eligibility, /expandSearchKeywords/);
   assert.match(popup, /ROLE_SIGNAL_CAPTURE/);
   assert.match(popup, /ROLE_SIGNAL_RUN_NEXT/);
   assert.match(phase7Migration, /CREATE TABLE `application_executions`/);

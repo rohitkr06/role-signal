@@ -9,6 +9,8 @@ RoleSignal is an explainable job-discovery and assisted-application workspace fo
 - Runs one ranked search across Jobicy, Arbeitnow, optional Adzuna, optional Jooble, optional Google Jobs via SerpApi, and connected Greenhouse, Lever, or Ashby company boards.
 - Reports real connector health—last attempt, response count, accepted jobs, latency, and errors—instead of displaying static “live” badges.
 - Imports LinkedIn, Naukri, Indeed, Foundit, Workday, and other portal alert emails without storing portal passwords or scraping protected pages.
+- Searches Freehire's public ATS catalog for India and worldwide-remote roles and Remotive's public remote feed without requiring API keys.
+- Labels each match as India-ready, eligibility-needs-verification, or location-restricted before any automatic preparation.
 - Deduplicates imported listings and scores them using only the active, user-confirmed resume evidence.
 - Prepares grounded application packets, tailored resumes, cover notes, and reusable answers with an audit trail.
 - Queues only applications explicitly approved for filling. The Chrome companion fills recognized fields and pauses before submission.
@@ -44,7 +46,7 @@ npm run db:generate
 
 ## Browser companion
 
-The extension source is in `browser-extension/`. Load it unpacked from `chrome://extensions`, or download the generated zip from the running app. Version 0.7 pairs with the guarded execution queue, fills approved applications, uploads the selected resume, and pauses before final submission. Protected portals are covered through their job-alert emails and browser-assisted capture rather than credential scraping.
+The extension source is in `browser-extension/`. Load it unpacked from `chrome://extensions`, or download the generated zip from the running app. Version 0.8 pairs with the guarded execution queue, fills approved applications, captures visible jobs from supported portals including Weekday, uploads the selected resume, and pauses before final submission. Protected portals are covered through their job-alert emails and browser-assisted capture rather than credential scraping.
 
 ## Publish to GitHub
 
