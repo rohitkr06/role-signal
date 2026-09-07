@@ -12,6 +12,7 @@ RoleSignal is an explainable job-discovery and assisted-application workspace fo
 - Searches Freehire's public ATS catalog for India and worldwide-remote roles and Remotive's public remote feed without requiring API keys.
 - Labels each match as India-ready, eligibility-needs-verification, or location-restricted before any automatic preparation.
 - Deduplicates imported listings and scores them using only the active, user-confirmed resume evidence.
+- Matches resumes against a general, multi-domain skill taxonomy (software engineering, data, product, design, marketing, sales, finance, operations, and more — see `lib/skill-taxonomy.ts`) rather than a single hardcoded profession, so discovery and scoring work for any resume someone uploads, not only backend engineers.
 - Prepares grounded application packets, tailored resumes, cover notes, and reusable answers with an audit trail.
 - Queues only applications explicitly approved for filling. The Chrome companion fills recognized fields and pauses before submission.
 - Stops for CAPTCHAs, missing required answers, unsupported controls, stale evidence, and any state it cannot safely verify.
