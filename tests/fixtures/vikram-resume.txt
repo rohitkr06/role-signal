@@ -1,0 +1,13 @@
+Vikram Rao
+vikram.rao@example.com
+Senior Product Manager
+
+7 years of professional experience leading product strategy and roadmaps.
+
+Skills
+Product Strategy, Product Roadmap, User Research, A/B Testing, Agile, JIRA, Stakeholder Management
+
+Experience
+- Drove a product roadmap that increased activation rate by 18% across 3 quarters.
+- Led user research and A/B testing that improved checkout conversion by 22%.
+- Managed stakeholder alignment across engineering, design, and sales for a major launch.

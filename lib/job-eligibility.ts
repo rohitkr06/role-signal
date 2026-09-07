@@ -1,3 +1,5 @@
+import { categoriesForSkills, categoryById } from "./skill-taxonomy.ts";
+
 export type IndiaEligibilityDecision = "ELIGIBLE" | "VERIFY" | "INELIGIBLE";
 
 export type IndiaEligibilityStatus =
@@ -101,13 +103,26 @@ export function assessIndiaEligibility(input: EligibilityInput): IndiaEligibilit
 export function expandSearchKeywords(keywords: string[], profile: { title?: string; skills?: string[]; domains?: string[] }) {
   const values = [...keywords];
   const title = (profile.title || "").trim();
-  const skills = (profile.skills || []).map((skill) => skill.toLowerCase());
-  const domains = (profile.domains || []).join(" ").toLowerCase();
   if (title) values.push(title);
+
+  // Legacy synonyms for the software-engineering title shorthand that predates the
+  // general taxonomy below. Kept because "SDE 2" / "SDE II" style titles are common
+  // enough in Indian job postings that they're worth a direct synonym regardless of
+  // whether the general category match below also fires.
   if (/software development engineer ii|sde[- ]?2/i.test(title)) values.push("Software Engineer II", "SDE 2");
-  if (/backend/.test(`${title} ${domains}`)) values.push("Backend Engineer");
-  if (/distributed|platform|infrastructure/.test(domains)) values.push("Platform Engineer");
-  if (/voice|agent|generative|ai/.test(domains)) values.push("AI Platform Engineer");
-  if (skills.some((skill) => /node(?:\.js|js)/.test(skill))) values.push("Node.js Engineer");
+
+  // General case: pull title synonyms from whichever taxonomy categories the
+  // candidate's actual skills fall under, so a marketing, sales, design, or any
+  // other profile gets the same kind of query expansion an engineering profile does.
+  const categoryMatches = categoriesForSkills(profile.skills || []);
+  for (const match of categoryMatches.slice(0, 2)) {
+    const category = categoryById(match.categoryId);
+    if (!category) continue;
+    for (const candidateTitle of category.titles.slice(0, 3)) values.push(titleCase(candidateTitle));
+  }
   return [...new Set(values.map((value) => value.trim()).filter(Boolean))].slice(0, 10);
+}
+
+function titleCase(value: string) {
+  return value.replace(/\w\S*/g, (word) => word.charAt(0).toUpperCase() + word.slice(1));
 }
