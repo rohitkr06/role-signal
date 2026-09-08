@@ -1054,7 +1054,7 @@ async function safeJsonFetch(urlValue: string, init: RequestInit = {}) {
     const headers = new Headers(init.headers);
     headers.set("accept", "application/json");
     headers.set("user-agent", "RoleSignal/8.0 unified job discovery");
-    const response = await fetch(target, { ...init, headers, redirect: "error", signal: controller.signal });
+    const response = await fetch(target, { ...init, headers, redirect: "manual", signal: controller.signal });
     if (!response.ok) throw new Error(`The discovery provider returned ${response.status}.`);
     const length = Number(response.headers.get("content-length") ?? 0);
     if (length > 4_000_000) throw new Error("The discovery response is too large to process safely.");
@@ -1755,8 +1755,6 @@ async function fetchJobicyDiscovery(config: DiscoveryConfig): Promise<DiscoveryP
   const keyword = config.keywords[0]?.replace(/\b(engineer|engineering|developer)\b/gi, "").trim() || "backend";
   const url = new URL("https://jobicy.com/api/v2/remote-jobs");
   url.searchParams.set("count", "100");
-  url.searchParams.set("geo", "apac");
-  url.searchParams.set("industry", "engineering");
   url.searchParams.set("tag", keyword);
   const payload = await safeJsonFetch(url.toString()).then((response) => response.json() as Promise<{ jobs?: JobicyJob[] }>);
   const jobs = payload.jobs ?? [];
@@ -1850,7 +1848,7 @@ async function fetchFreehireDiscovery(config: DiscoveryConfig): Promise<Discover
 
 async function fetchRemotiveDiscovery(config: DiscoveryConfig): Promise<DiscoveryProviderResult> {
   const url = new URL("https://remotive.com/api/remote-jobs");
-  url.searchParams.set("category", "software-dev");
+  url.searchParams.set("search", primaryDiscoveryQuery(config));
   url.searchParams.set("limit", "100");
   const payload = await safeJsonFetch(url.toString()).then((response) => response.json() as Promise<{ jobs?: RemotiveJob[] }>);
   const jobs = payload.jobs ?? [];
