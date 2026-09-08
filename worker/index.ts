@@ -702,3 +702,643 @@ function rowToExecution(row: Record<string, unknown>) {
     documentVersion: row.document_version ? Number(row.document_version) : null,
   };
 }
+
+function companionCors(origin = "*") {
+  return {
+    "access-control-allow-origin": origin,
+    "access-control-allow-headers": "authorization, content-type",
+    "access-control-allow-methods": "GET, POST, OPTIONS",
+    "access-control-max-age": "86400",
+    "cache-control": "no-store",
+  };
+}
+
+function companionJson(data: unknown, status = 200) {
+  return Response.json(data, { status, headers: companionCors() });
+}
+
+async function sha256(value: string) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function newCompanionToken() {
+  const bytes = crypto.getRandomValues(new Uint8Array(24));
+  const encoded = btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+  return `rs_live_${encoded}`;
+}
+
+async function companionDeviceForRequest(request: Request, env: Env) {
+  const authorization = request.headers.get("authorization") ?? "";
+  const token = authorization.startsWith("Bearer ") ? authorization.slice(7).trim() : "";
+  if (!token.startsWith("rs_live_")) return null;
+  const hash = await sha256(token);
+  return env.DB.prepare(
+    "SELECT * FROM companion_devices WHERE token_hash = ? AND status = 'ACTIVE'",
+  ).bind(hash).first<Record<string, unknown>>();
+}
+
+async function executionRows(env: Env, userId: string, profileVersionId: string) {
+  const result = await env.DB.prepare(
+    `SELECT e.*, j.company, j.role, j.location, j.match_score, d.version AS document_version
+     FROM application_executions e
+     JOIN job_matches j ON j.id = e.job_id
+     LEFT JOIN tailored_documents d ON d.id = e.document_id
+     WHERE e.user_id = ? AND e.profile_version_id = ? ORDER BY e.updated_at DESC LIMIT 100`,
+  ).bind(userId, profileVersionId).all<Record<string, unknown>>();
+  return result.results.map(rowToExecution);
+}
+
+function studioJobFromRow(row: Record<string, unknown>): StudioJob {
+  return {
+    id: asString(row.id),
+    company: asString(row.company),
+    role: asString(row.role),
+    location: asString(row.location),
+    description: asString(row.description),
+    applicationUrl: asString(row.application_url),
+    score: Number(row.match_score),
+  };
+}
+
+function safeStudioContent(value: unknown): StudioContent {
+  const body = value && typeof value === "object" ? value as Record<string, unknown> : {};
+  const sections = Array.isArray(body.sections) ? body.sections.slice(0, 8).map((section, sectionIndex) => {
+    const item = section && typeof section === "object" ? section as Record<string, unknown> : {};
+    return {
+      id: asString(item.id, `section-${sectionIndex + 1}`).replace(/[^a-zA-Z0-9-]/g, "-").slice(0, 80),
+      title: asString(item.title, "Section").slice(0, 120),
+      items: Array.isArray(item.items) ? item.items.map((entry) => asString(entry).slice(0, 1_200)).filter(Boolean).slice(0, 30) : [],
+    };
+  }).filter((section) => section.items.length) : [];
+  const answers = Array.isArray(body.answers) ? body.answers.slice(0, 10).map((answer, answerIndex) => {
+    const item = answer && typeof answer === "object" ? answer as Record<string, unknown> : {};
+    return {
+      id: asString(item.id, `answer-${answerIndex + 1}`).replace(/[^a-zA-Z0-9-]/g, "-").slice(0, 80),
+      question: asString(item.question, "Application question").slice(0, 500),
+      answer: asString(item.answer).slice(0, 2_000),
+    };
+  }).filter((answer) => answer.answer) : [];
+  return {
+    name: asString(body.name, "Candidate").slice(0, 120),
+    headline: asString(body.headline, "Software Engineer").slice(0, 180),
+    contactLine: asString(body.contactLine).slice(0, 500),
+    summary: asString(body.summary).slice(0, 1_200),
+    skills: Array.isArray(body.skills) ? body.skills.map((skill) => asString(skill).slice(0, 100)).filter(Boolean).slice(0, 30) : [],
+    sections,
+    coverNote: asString(body.coverNote).slice(0, 2_500),
+    answers,
+  };
+}
+
+async function studioSources(env: Env, user: { id: string; email: string; name: string }) {
+  const row = await env.DB.prepare(
+    `SELECT v.id AS profile_version_id, v.resume_id, v.raw_text, v.extracted_json
+     FROM career_profiles p JOIN career_profile_versions v ON v.id = p.active_profile_version_id
+     WHERE p.user_id = ? AND v.user_id = p.user_id AND v.status = 'ACTIVE'`,
+  ).bind(user.id).first<Record<string, unknown>>();
+  if (!row) throw new Error("Confirm your resume profile before creating tailored documents.");
+  const rawText = asString(row?.raw_text).slice(0, 200_000);
+  const profile = parseJson<CandidateProfile>(row?.extracted_json, EMPTY_PROFILE);
+  const vault = await answersForUser(env, user.id);
+  return { profileVersionId: asString(row?.profile_version_id), resumeId: asString(row?.resume_id), rawText, profile, vault: vault.values };
+}
+
+const answerDefinitions = {
+  phone: { label: "Phone number", sensitive: true },
+  linkedin_url: { label: "LinkedIn URL", sensitive: false },
+  github_url: { label: "GitHub URL", sensitive: false },
+  current_location: { label: "Current location", sensitive: false },
+  notice_period: { label: "Notice period", sensitive: true },
+  current_compensation: { label: "Current compensation", sensitive: true },
+  expected_compensation: { label: "Expected compensation", sensitive: true },
+  work_authorization: { label: "Work authorization", sensitive: true },
+  relocation: { label: "Relocation preference", sensitive: true },
+} as const;
+
+type AnswerKey = keyof typeof answerDefinitions;
+
+function answerKeyForQuestion(question: string): AnswerKey | "" {
+  const text = question.toLowerCase();
+  if (/phone|mobile/.test(text)) return "phone";
+  if (/linkedin/.test(text)) return "linkedin_url";
+  if (/github/.test(text)) return "github_url";
+  if (/current location|where.*located/.test(text)) return "current_location";
+  if (/notice period|joining time|available to start/.test(text)) return "notice_period";
+  if (/current (compensation|salary|ctc)/.test(text)) return "current_compensation";
+  if (/expected (compensation|salary|ctc)|salary expectation/.test(text)) return "expected_compensation";
+  if (/authorization|visa|sponsor|legally authorized/.test(text)) return "work_authorization";
+  if (/relocat/.test(text)) return "relocation";
+  return "";
+}
+
+async function answersForUser(env: Env, userId: string) {
+  const result = await env.DB.prepare(
+    "SELECT field_key, label, value, status, sensitive, updated_at FROM answer_vault WHERE user_id = ? ORDER BY field_key",
+  ).bind(userId).all<Record<string, unknown>>();
+  const values: Record<string, string> = {};
+  for (const row of result.results) values[asString(row.field_key)] = asString(row.value);
+  return { rows: result.results, values };
+}
+
+function buildApplicationKit(
+  profile: CandidateProfile,
+  job: Record<string, unknown>,
+  scored: ScoredJob,
+  packetId: string,
+  answers: Record<string, string>,
+) {
+  const evidence = (scored.matchingExperience ?? []).slice(0, 5);
+  const resumeChanges = (scored.resumeChanges ?? []).slice(0, 5);
+  const strongest = evidence.slice(0, 3).join(", ").replace(/, ([^,]*)$/, " and $1");
+  const role = asString(job.role);
+  const company = asString(job.company);
+  const summary = `Use the active verified resume${scored.resumeFit === "CUSTOMIZE" ? " with targeted evidence ordering" : ""}. Lead with ${strongest || profile.title || "the most relevant verified experience"}.`;
+  const whyAnswer = `This ${role} role aligns with my verified experience in ${strongest || profile.title || "software engineering"}. I am interested in applying that experience to ${company}'s product and engineering challenges.`;
+  return {
+    packetId,
+    summary,
+    whyAnswer,
+    resumeChanges,
+    evidence,
+    formAnswers: answers,
+    status: "READY_FOR_REVIEW",
+  };
+}
+
+function selectHighestPriority(jobs: Array<Record<string, unknown>>, limit: number) {
+  const sorted = [...jobs].sort((a, b) => {
+    const aScore = Number(a.match_score) + (parseJson<{ highPriority?: boolean }>(a.score_json, {}).highPriority ? 4 : 0);
+    const bScore = Number(b.match_score) + (parseJson<{ highPriority?: boolean }>(b.score_json, {}).highPriority ? 4 : 0);
+    return bScore - aScore;
+  });
+  const selected: Array<Record<string, unknown>> = [];
+  const companies = new Set<string>();
+  for (const job of sorted) {
+    const company = asString(job.company).toLowerCase();
+    if (companies.has(company)) continue;
+    selected.push(job);
+    companies.add(company);
+    if (selected.length === limit) break;
+  }
+  return selected;
+}
+
+function csvCell(value: unknown) {
+  const text = String(value ?? "").replaceAll('"', '""');
+  return `"${text}"`;
+}
+
+async function profileForUser(env: Env, user: { id: string; email: string; name: string }) {
+  const row = await env.DB.prepare(
+    `SELECT v.id AS profile_version_id, v.resume_id, v.extracted_json
+     FROM career_profiles p
+     JOIN career_profile_versions v ON v.id = p.active_profile_version_id AND v.user_id = p.user_id
+     WHERE p.user_id = ? AND v.status = 'ACTIVE'`,
+  ).bind(user.id).first<Record<string, unknown>>();
+  if (!row?.extracted_json) return { ...EMPTY_PROFILE, name: "", email: user.email };
+  const parsed = parseJson<CandidateProfile>(row.extracted_json, EMPTY_PROFILE);
+  return {
+    ...EMPTY_PROFILE,
+    ...parsed,
+    name: parsed.name,
+    email: parsed.email || user.email,
+    experienceYears: parsed.experienceYears || 0,
+    skills: [...new Set(parsed.skills ?? [])],
+    domains: [...new Set(parsed.domains ?? [])],
+    evidence: [...new Set(parsed.evidence ?? [])].slice(0, 20),
+  } satisfies CandidateProfile;
+}
+
+async function activeEvidenceForUser(env: Env, userId: string) {
+  const row = await env.DB.prepare(
+    `SELECT v.id AS profile_version_id, v.resume_id, v.version, v.extracted_json, v.activated_at
+     FROM career_profiles p
+     JOIN career_profile_versions v ON v.id = p.active_profile_version_id AND v.user_id = p.user_id
+     WHERE p.user_id = ? AND v.status = 'ACTIVE'`,
+  ).bind(userId).first<Record<string, unknown>>();
+  if (!row) return null;
+  return {
+    profileVersionId: asString(row.profile_version_id),
+    resumeId: asString(row.resume_id),
+    version: Number(row.version),
+    activatedAt: asString(row.activated_at),
+    profile: parseJson<CandidateProfile>(row.extracted_json, EMPTY_PROFILE),
+  };
+}
+
+async function requireActiveEvidence(env: Env, userId: string) {
+  const active = await activeEvidenceForUser(env, userId);
+  if (!active) throw new Error("Review and confirm your resume profile before discovering or applying to jobs.");
+  return active;
+}
+
+async function pendingProfileForUser(env: Env, userId: string) {
+  const row = await env.DB.prepare(
+    `SELECT id, resume_id, version, status, extracted_json, created_at
+     FROM career_profile_versions WHERE user_id = ? AND status = 'PENDING_REVIEW'
+     ORDER BY version DESC LIMIT 1`,
+  ).bind(userId).first<Record<string, unknown>>();
+  if (!row) return null;
+  return {
+    id: row.id,
+    resumeId: row.resume_id,
+    version: Number(row.version),
+    status: row.status,
+    profile: parseJson<CandidateProfile>(row.extracted_json, EMPTY_PROFILE),
+    createdAt: row.created_at,
+  };
+}
+
+async function assertCurrentEvidence(env: Env, userId: string, profileVersionId: unknown) {
+  const active = await requireActiveEvidence(env, userId);
+  if (!profileVersionId || profileVersionId !== active.profileVersionId) {
+    throw new Error("This item was created from an older resume. Rebuild it from your active verified profile.");
+  }
+  return active;
+}
+
+async function saveScoredJob(env: Env, userId: string, scored: ScoredJob, sourceId: string | null, now: string) {
+  const active = await requireActiveEvidence(env, userId);
+  const existing = await env.DB.prepare(
+    "SELECT * FROM job_matches WHERE user_id = ? AND fingerprint = ?",
+  ).bind(userId, scored.fingerprint).first<Record<string, unknown>>();
+  const id = asString(existing?.id) || crypto.randomUUID();
+  const officialPlatforms = new Set(["Company site", "Greenhouse", "Lever", "Ashby"]);
+  if (existing && existing.profile_version_id === active.profileVersionId && officialPlatforms.has(asString(existing.platform)) && !officialPlatforms.has(scored.platform ?? "")) {
+    return { id, duplicate: true, applicationUrl: asString(existing.application_url), preserved: true };
+  }
+  const shouldPreferNewUrl = !existing || officialPlatforms.has(scored.platform ?? "");
+  const applicationUrl = shouldPreferNewUrl ? scored.applicationUrl : asString(existing.application_url, scored.applicationUrl);
+  await env.DB.prepare(
+    `INSERT INTO job_matches
+     (id, user_id, source_id, profile_version_id, resume_id, fingerprint, company, role, location, work_mode, platform,
+       application_url, posted_date, description, compensation, match_score, classification,
+       status, score_json, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(user_id, fingerprint) DO UPDATE SET
+       source_id = excluded.source_id,
+       profile_version_id = excluded.profile_version_id,
+       resume_id = excluded.resume_id,
+       work_mode = excluded.work_mode,
+       platform = excluded.platform,
+       application_url = excluded.application_url,
+       posted_date = excluded.posted_date,
+       description = excluded.description,
+       compensation = excluded.compensation,
+       match_score = excluded.match_score,
+       classification = excluded.classification,
+       status = excluded.status,
+       score_json = excluded.score_json,
+       updated_at = excluded.updated_at`,
+  ).bind(
+    id, userId, sourceId, active.profileVersionId, active.resumeId || null, scored.fingerprint, scored.company, scored.role, scored.location,
+    scored.workMode ?? "Not specified", scored.platform ?? "Company site", applicationUrl,
+    scored.postedDate ?? null, scored.description, scored.compensation ?? null, scored.score,
+    scored.classification, scored.status, JSON.stringify({ ...scored, applicationUrl }), now, now,
+  ).run();
+  return { id, duplicate: Boolean(existing), applicationUrl, preserved: false };
+}
+
+function isPrivateHostname(hostname: string) {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (host === "localhost" || host === "::1" || host.endsWith(".local") || host.endsWith(".internal")) return true;
+  const ipv4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (!ipv4) return false;
+  const parts = ipv4.slice(1).map(Number);
+  return parts[0] === 10 || parts[0] === 127 || parts[0] === 0 ||
+    (parts[0] === 169 && parts[1] === 254) ||
+    (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) ||
+    (parts[0] === 192 && parts[1] === 168);
+}
+
+async function safeFetch(urlValue: string, accept = "text/html,application/json") {
+  let target: URL;
+  try { target = new URL(urlValue); } catch { throw new Error("Enter a valid HTTPS job URL."); }
+  if (target.protocol !== "https:" || isPrivateHostname(target.hostname)) throw new Error("Only public HTTPS job URLs are supported.");
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 12_000);
+  try {
+    let current = target;
+    for (let redirect = 0; redirect <= 4; redirect += 1) {
+      const response = await fetch(current, {
+        headers: { accept, "user-agent": "RoleSignal/5.0 evidence-semantic job assistant" },
+        redirect: "manual",
+        signal: controller.signal,
+      });
+      if (response.status >= 300 && response.status < 400) {
+        const location = response.headers.get("location");
+        if (!location || redirect === 4) throw new Error("The job source redirected too many times.");
+        current = new URL(location, current);
+        if (current.protocol !== "https:" || isPrivateHostname(current.hostname)) throw new Error("The job source redirected to an unsafe address.");
+        continue;
+      }
+      if (!response.ok) throw new Error(`The job source returned ${response.status}.`);
+      const length = Number(response.headers.get("content-length") ?? 0);
+      if (length > 3_000_000) throw new Error("The job page is too large to import safely.");
+      return response;
+    }
+    throw new Error("The job source could not be reached.");
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function safeJsonFetch(urlValue: string, init: RequestInit = {}) {
+  let target: URL;
+  try { target = new URL(urlValue); } catch { throw new Error("The discovery provider URL is invalid."); }
+  if (target.protocol !== "https:" || isPrivateHostname(target.hostname)) throw new Error("Only public HTTPS discovery providers are supported.");
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15_000);
+  try {
+    const headers = new Headers(init.headers);
+    headers.set("accept", "application/json");
+    headers.set("user-agent", "RoleSignal/8.0 unified job discovery");
+    const response = await fetch(target, { ...init, headers, redirect: "error", signal: controller.signal });
+    if (!response.ok) throw new Error(`The discovery provider returned ${response.status}.`);
+    const length = Number(response.headers.get("content-length") ?? 0);
+    if (length > 4_000_000) throw new Error("The discovery response is too large to process safely.");
+    return response;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function titleFromHtml(html: string) {
+  const og = html.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i)?.[1];
+  const title = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1];
+  return stripHtml(og || title || "").split(/\s+[|–—]\s+/)[0].trim();
+}
+
+function metaContent(html: string, name: string) {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return stripHtml(
+    html.match(new RegExp(`<meta[^>]+(?:name|property)=["']${escaped}["'][^>]+content=["']([^"']+)["']`, "i"))?.[1] ||
+    html.match(new RegExp(`<meta[^>]+content=["']([^"']+)["'][^>]+(?:name|property)=["']${escaped}["']`, "i"))?.[1] ||
+    "",
+  );
+}
+
+function findJobPosting(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object") return null;
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const match = findJobPosting(item);
+      if (match) return match;
+    }
+    return null;
+  }
+  const object = value as Record<string, unknown>;
+  const type = object["@type"];
+  if (type === "JobPosting" || (Array.isArray(type) && type.includes("JobPosting"))) return object;
+  for (const child of Object.values(object)) {
+    const match = findJobPosting(child);
+    if (match) return match;
+  }
+  return null;
+}
+
+function jobPostingFromHtml(html: string) {
+  for (const match of html.matchAll(/<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)) {
+    try {
+      const posting = findJobPosting(JSON.parse(match[1]));
+      if (posting) return posting;
+    } catch {
+      // Continue to the next structured-data block.
+    }
+  }
+  return null;
+}
+
+function structuredLocation(posting: Record<string, unknown> | null, fallback: string) {
+  if (!posting) return fallback;
+  if (asString(posting.jobLocationType).toUpperCase() === "TELECOMMUTE") return "Remote";
+  const locations = Array.isArray(posting.jobLocation) ? posting.jobLocation : posting.jobLocation ? [posting.jobLocation] : [];
+  const values = locations.map((location) => {
+    if (!location || typeof location !== "object") return "";
+    const addressValue = (location as Record<string, unknown>).address;
+    if (typeof addressValue === "string") return addressValue;
+    const address = addressValue && typeof addressValue === "object" ? addressValue as Record<string, unknown> : {};
+    return [address.addressLocality, address.addressRegion, address.addressCountry].map((item) => asString(item)).filter(Boolean).join(", ");
+  }).filter(Boolean);
+  return values.join(" / ") || fallback;
+}
+
+async function enrichSavedJob(env: Env, user: { id: string; email: string; name: string }, jobId: string, now: string) {
+  const row = await env.DB.prepare("SELECT * FROM job_matches WHERE id = ? AND user_id = ?").bind(jobId, user.id).first<Record<string, unknown>>();
+  if (!row) throw new Error("That job is no longer available in your workspace.");
+  const response = await safeFetch(asString(row.application_url), "text/html,application/xhtml+xml");
+  const html = (await response.text()).slice(0, 3_000_000);
+  const posting = jobPostingFromHtml(html);
+  const structuredDescription = stripHtml(asString(posting?.description));
+  const pageDescription = metaContent(html, "description") || metaContent(html, "og:description");
+  const bodyDescription = stripHtml(html).slice(0, 120_000);
+  const description = [structuredDescription, pageDescription, bodyDescription, asString(row.description)]
+    .sort((a, b) => b.length - a.length)[0]
+    .slice(0, 120_000);
+  if (description.length < 120) throw new Error("The official page did not expose enough job-description text. Paste the full description during import instead.");
+  const location = structuredLocation(posting, asString(row.location));
+  const input: JobInput = {
+    company: asString(row.company),
+    role: asString(row.role),
+    location,
+    workMode: inferWorkMode(location, description),
+    platform: asString(row.platform),
+    applicationUrl: asString(row.application_url),
+    postedDate: asString(posting?.datePosted, asString(row.posted_date)),
+    description,
+    compensation: asString(row.compensation),
+  };
+  const scored = scoreJob(await profileForUser(env, user), input);
+  await env.DB.prepare(
+    `UPDATE job_matches SET location = ?, work_mode = ?, posted_date = ?, description = ?,
+     match_score = ?, classification = ?, status = ?, score_json = ?, updated_at = ?
+     WHERE id = ? AND user_id = ?`,
+  ).bind(
+    scored.location, scored.workMode, scored.postedDate || null, scored.description,
+    scored.score, scored.classification, scored.status,
+    JSON.stringify({ ...scored, enrichedAt: now, enrichmentSource: response.url || input.applicationUrl }),
+    now, jobId, user.id,
+  ).run();
+  const updated = await env.DB.prepare("SELECT * FROM job_matches WHERE id = ? AND user_id = ?").bind(jobId, user.id).first<Record<string, unknown>>();
+  return updated ? rowToJob(updated) : null;
+}
+
+function companyFromUrl(urlValue: string) {
+  try {
+    const host = new URL(urlValue).hostname.replace(/^www\./, "");
+    const first = host.split(".")[0].replace(/[-_]/g, " ");
+    return first.replace(/\b\w/g, (value) => value.toUpperCase());
+  } catch { return "Unknown company"; }
+}
+
+async function importSingleJob(
+  body: Record<string, unknown>,
+  env: Env,
+  user: { id: string; email: string; name: string },
+  now: string,
+) {
+  const jobUrl = asString(body.jobUrl || body.applicationUrl);
+  let description = asString(body.description);
+  let role = asString(body.role);
+  if (!jobUrl) throw new Error("An official application URL is required.");
+  if (!description || !role) {
+    const response = await safeFetch(jobUrl);
+    const html = (await response.text()).slice(0, 500_000);
+    description ||= stripHtml(html).slice(0, 120_000);
+    role ||= titleFromHtml(html);
+  }
+  if (!description) throw new Error("Paste the full job description because this page blocks importing.");
+  if (!role) throw new Error("Add the job title so RoleSignal can score the opportunity.");
+  const company = asString(body.company, companyFromUrl(jobUrl));
+  const location = asString(body.location, "Not specified");
+  const input: JobInput = {
+    company,
+    role,
+    location,
+    workMode: asString(body.workMode, inferWorkMode(location, description)),
+    platform: asString(body.platform, inferPlatform(jobUrl)),
+    applicationUrl: jobUrl,
+    postedDate: asString(body.postedDate),
+    description: description.slice(0, 120_000),
+    compensation: asString(body.compensation),
+  };
+  const scored = scoreJob(await profileForUser(env, user), input);
+  const saved = await saveScoredJob(env, user.id, scored, null, now);
+  return { ...scored, ...saved };
+}
+
+type GreenhouseJob = {
+  id: number;
+  title: string;
+  updated_at?: string;
+  absolute_url: string;
+  content?: string;
+  location?: { name?: string };
+};
+
+type LeverJob = {
+  id: string;
+  text: string;
+  hostedUrl?: string;
+  applyUrl?: string;
+  createdAt?: number;
+  description?: string;
+  descriptionPlain?: string;
+  additional?: string;
+  additionalPlain?: string;
+  categories?: { location?: string; commitment?: string; team?: string; allLocations?: string[] };
+  lists?: Array<{ text?: string; content?: string }>;
+};
+
+type AshbyJob = {
+  title?: string;
+  location?: string;
+  secondaryLocations?: Array<{ location?: string }>;
+  isListed?: boolean;
+  isRemote?: boolean;
+  workplaceType?: "OnSite" | "Remote" | "Hybrid";
+  descriptionHtml?: string;
+  descriptionPlain?: string;
+  publishedAt?: string;
+  jobUrl?: string;
+  applyUrl?: string;
+  compensation?: {
+    compensationTierSummary?: string;
+    scrapeableCompensationSalarySummary?: string;
+  };
+};
+
+async function scanSource(
+  body: Record<string, unknown>,
+  env: Env,
+  user: { id: string; email: string; name: string },
+  now: string,
+) {
+  const provider = asString(body.provider).toLowerCase();
+  const token = asString(body.token);
+  const label = asString(body.label, token.replace(/[-_]/g, " ").replace(/\b\w/g, (value) => value.toUpperCase()));
+  if (!new Set(["greenhouse", "lever", "ashby"]).has(provider)) throw new Error("Choose Greenhouse, Lever or Ashby.");
+  if (!/^[a-z0-9][a-z0-9_-]{1,79}$/i.test(token)) throw new Error("Enter the company board token from its careers URL.");
+
+  const profile = await profileForUser(env, user);
+  let inputs: JobInput[] = [];
+
+  if (provider === "greenhouse") {
+    const response = await safeFetch(`https://boards-api.greenhouse.io/v1/boards/${encodeURIComponent(token)}/jobs?content=true`, "application/json");
+    const payload = await response.json() as { jobs?: GreenhouseJob[] };
+    inputs = (payload.jobs ?? []).slice(0, 100).map((job) => {
+      const description = stripHtml(job.content ?? "");
+      const location = job.location?.name || "Not specified";
+      return {
+        externalId: String(job.id), company: label, role: job.title, location,
+        workMode: inferWorkMode(location, description), platform: "Greenhouse",
+        applicationUrl: job.absolute_url, postedDate: job.updated_at,
+        description,
+      };
+    });
+  } else if (provider === "lever") {
+    const response = await safeFetch(`https://api.lever.co/v0/postings/${encodeURIComponent(token)}?mode=json&limit=100`, "application/json");
+    const payload = await response.json() as LeverJob[];
+    inputs = payload.slice(0, 100).map((job) => {
+      const description = stripHtml([
+        job.descriptionPlain || job.description || "",
+        ...(job.lists ?? []).map((item) => `${item.text ?? ""} ${stripHtml(item.content ?? "")}`),
+        job.additionalPlain || job.additional || "",
+      ].join(" "));
+      const location = job.categories?.allLocations?.join(", ") || job.categories?.location || "Not specified";
+      return {
+        externalId: job.id, company: label, role: job.text, location,
+        workMode: inferWorkMode(location, description), platform: "Lever",
+        applicationUrl: job.hostedUrl || job.applyUrl || `https://jobs.lever.co/${token}/${job.id}`,
+        postedDate: job.createdAt ? new Date(job.createdAt).toISOString() : undefined,
+        description,
+      };
+    });
+  } else {
+    const response = await safeFetch(`https://api.ashbyhq.com/posting-api/job-board/${encodeURIComponent(token)}?includeCompensation=true`, "application/json");
+    const payload = await response.json() as { jobs?: AshbyJob[] };
+    inputs = (payload.jobs ?? []).filter((job) => job.isListed !== false).slice(0, 100).map((job) => {
+      const description = stripHtml(job.descriptionPlain || job.descriptionHtml || "");
+      const location = [job.location, ...(job.secondaryLocations ?? []).map((item) => item.location)].filter(Boolean).join(" / ") || "Not specified";
+      const workMode = job.workplaceType === "OnSite" ? "On-site" : job.workplaceType || (job.isRemote ? "Remote" : inferWorkMode(location, description));
+      return {
+        externalId: job.jobUrl || job.applyUrl, company: label, role: asString(job.title, "Untitled role"), location,
+        workMode, platform: "Ashby", applicationUrl: job.jobUrl || job.applyUrl || `https://jobs.ashbyhq.com/${encodeURIComponent(token)}`,
+        postedDate: job.publishedAt, description,
+        compensation: job.compensation?.scrapeableCompensationSalarySummary || job.compensation?.compensationTierSummary,
+      };
+    });
+  }
+
+  const sourceId = crypto.randomUUID();
+  await env.DB.prepare(
+    `INSERT INTO job_sources (id, user_id, provider, source_token, label, active, last_scanned_at, created_at)
+     VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+     ON CONFLICT(user_id, provider, source_token) DO UPDATE SET
+       label = excluded.label, active = 1, last_scanned_at = excluded.last_scanned_at`,
+  ).bind(sourceId, user.id, provider, token, label, now, now).run();
+  const sourceRow = await env.DB.prepare(
+    "SELECT id FROM job_sources WHERE user_id = ? AND provider = ? AND source_token = ?",
+  ).bind(user.id, provider, token).first<Record<string, unknown>>();
+  const durableSourceId = asString(sourceRow?.id, sourceId);
+  let duplicates = 0;
+  const scored: Array<ScoredJob & { id: string }> = [];
+  for (const input of inputs) {
+    const result = scoreJob(profile, input);
+    const saved = await saveScoredJob(env, user.id, result, durableSourceId, now);
+    if (saved.duplicate) duplicates += 1;
+    scored.push({ ...result, id: saved.id });
+  }
+  return {
+    provider,
+    source: label,
+    discovered: inputs.length,
+    unique: inputs.length - duplicates,
+    duplicates,
+    strong: scored.filter((job) => job.score >= 82).length,
+    ready: scored.filter((job) => job.score >= 75 && job.status !== "SKIPPED").length,
+    skipped: scored.filter((job) => job.status === "SKIPPED").length,
+    top: scored.sort((a, b) => b.score - a.score).slice(0, 10),
+  };
+}
