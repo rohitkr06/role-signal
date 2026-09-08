@@ -13,6 +13,7 @@ import {
   type ScoredJob,
 } from "../lib/rolesignal";
 import { expandSearchKeywords } from "../lib/job-eligibility";
+import { defaultDiscoveryKeywords, defaultDiscoveryName, isDiscoveryCandidate as isDiscoveryCandidateGeneric } from "../lib/discovery-query";
 import {
   buildResumeDocx,
   buildResumePdf,
@@ -1594,10 +1595,14 @@ function stringList(value: unknown, fallback: string[]) {
   return [...new Set(source.map((item) => asString(item).slice(0, 80)).filter(Boolean))].slice(0, 12);
 }
 
-function discoveryConfig(body: Record<string, unknown>): DiscoveryConfig {
+// `profile` drives the default keywords/name so a discovery search someone hasn't
+// customized yet still searches for roles matching *their* resume rather than a
+// hardcoded backend-engineering default. See lib/discovery-query.ts.
+function discoveryConfig(body: Record<string, unknown>, profile: CandidateProfile = EMPTY_PROFILE): DiscoveryConfig {
+  const fallbackKeywords = defaultDiscoveryKeywords(profile);
   return {
-    name: asString(body.name, "Backend roles / India + Global Remote").slice(0, 80),
-    keywords: stringList(body.keywords, ["Backend Engineer", "Software Engineer", "Platform Engineer", "Node.js"]),
+    name: asString(body.name, defaultDiscoveryName(profile)).slice(0, 80),
+    keywords: stringList(body.keywords, fallbackKeywords),
     locations: stringList(body.locations, ["India", "Remote", "Worldwide", "APAC"]),
     workModes: stringList(body.workModes, ["Remote", "Hybrid"]),
     portals: stringList(body.portals, ["Freehire", "Remotive", "Jobicy", "Arbeitnow", "Connected ATS boards"]),
@@ -1606,24 +1611,7 @@ function discoveryConfig(body: Record<string, unknown>): DiscoveryConfig {
 }
 
 function isDiscoveryCandidate(job: JobInput, config: DiscoveryConfig) {
-  const role = job.role.toLowerCase();
-  const description = job.description.toLowerCase();
-  const targetTerms = config.keywords.flatMap((keyword) => {
-    const normalized = keyword.toLowerCase().trim();
-    const tokens = normalized.split(/[^a-z0-9+#.]+/).filter((token) => token.length >= 3 && !new Set(["engineer", "engineering", "software", "developer"]).has(token));
-    return [normalized, ...tokens];
-  });
-  const roleRelevant = targetTerms.some((term) => role.includes(term)) || /backend|back-end|platform engineer|api engineer|infrastructure engineer|distributed systems|node\.js|nodejs/.test(role);
-  if (!roleRelevant) return false;
-  const mode = (job.workMode || inferWorkMode(job.location, description)).toLowerCase();
-  const location = `${job.location} ${job.eligibilityHint || ""}`.toLowerCase();
-  const locationRelevant = config.locations.some((wanted) => {
-    const value = wanted.toLowerCase();
-    if (value === "remote") return mode === "remote" || /worldwide|anywhere/.test(location);
-    if (value === "apac") return /apac|asia|india|singapore|australia|remote|worldwide|anywhere/.test(location);
-    return location.includes(value);
-  });
-  return locationRelevant || (config.workModes.some((value) => value.toLowerCase() === "remote") && mode === "remote");
+  return isDiscoveryCandidateGeneric(job, config, inferWorkMode);
 }
 
 function compensationFromJobicy(job: JobicyJob) {
@@ -1960,7 +1948,7 @@ async function runDiscovery(
 ) {
   await requireActiveEvidence(env, user.id);
   const profile = await profileForUser(env, user);
-  const requestedConfig = discoveryConfig(body);
+  const requestedConfig = discoveryConfig(body, profile);
   const config = { ...requestedConfig, keywords: expandSearchKeywords(requestedConfig.keywords, profile) };
   const mode = body.mode === "SCHEDULED" ? "SCHEDULED" : "PUBLIC_FEEDS";
   const force = body.force === true || mode === "SCHEDULED";
@@ -3103,7 +3091,10 @@ async function handleRoleSignalApi(request: Request, env: Env, url: URL, ctx: Ex
       const existingSearch = await env.DB.prepare(
         "SELECT id FROM discovery_searches WHERE user_id = ? AND active = 1 ORDER BY updated_at DESC LIMIT 1",
       ).bind(user.id).first<Record<string, unknown>>();
-      if (!existingSearch) await upsertDiscoverySearch(env, user.id, discoveryConfig({ minScore }), now);
+      if (!existingSearch) {
+        const profile = await profileForUser(env, user);
+        await upsertDiscoverySearch(env, user.id, discoveryConfig({ minScore }, profile), now);
+      }
       const nextRunAt = addHours(now, cadenceHours);
       await env.DB.prepare(
         `INSERT INTO automation_settings
